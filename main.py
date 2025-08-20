@@ -1,190 +1,124 @@
 import telebot
-import csv
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-import os
-
-# === Настройки ===
-TOKEN = '8109304672:AAHkOQ8kzQLmHupii78YCd-1Q4HtDKWuuNk'
-AUDIO_FOLDER = 'audio'
-SPREADSHEET_NAME = 'music_testing'
-WORKSHEET_NAME = 'track_list'
-
-# === Google Sheets авторизация ===
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name("creds.json", scope)
-client = gspread.authorize(creds)
-sheet = client.open(SPREADSHEET_NAME).worksheet(WORKSHEET_NAME)
-
-# === Загрузка CSV-файла с треками ===
-with open('track_list.csv', newline='', encoding='utf-8') as f:
-    reader = csv.DictReader(f)
-    track_data = {row['track_number']: row['title'] for row in reader}
-
-# === Бот ===
-import telebot
 from telebot import types
+import openpyxl
 import os
 
+# === Токен бота ===
+TOKEN = "8109304672:AAHkOQ8kzQLmHupii78YCd-1Q4HtDKWuuNk"
 bot = telebot.TeleBot(TOKEN)
 
-# === Словари состояния ===
-user_progress     = {}   # какой трек у кого сейчас
-user_rated_tracks = {}   # что уже оценено
-user_metadata     = {}   # пол/возраст
-user_column       = {}   # столбец для каждого пользователя
-last_audios       = {}   # message_id последнего аудио
+# === ID администратора (твой) ===
+ADMIN_ID = 866964827
 
-# === Вспомогалки ===
-def insert_values_into_column(sheet, col, values):
-    for i, v in enumerate(values, start=1):
-        sheet.update_cell(i, col, v)
+# === Папка с треками ===
+TRACKS_DIR = "tracks"
+TRACK_LIST = sorted([f for f in os.listdir(TRACKS_DIR) if f.endswith(".mp3")])
 
-# === Опрос перед тестом ===
-from telebot import types
+# === Хранилище данных пользователей ===
+user_metadata = {}       # {chat_id: {"gender": "..", "age": ".."}}
+user_progress = {}       # {chat_id: индекс трека}
+user_rated_tracks = {}   # {chat_id: set(track_id)}
 
-# Обрабатываем любое первое сообщение от пользователя
+# === Файл для сохранения результатов ===
+RESULT_FILE = "results.xlsx"
+
+# Создаём Excel, если его нет
+if not os.path.exists(RESULT_FILE):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Results"
+    ws.append(["ChatID", "Gender", "Age", "TrackID", "Rating"])
+    wb.save(RESULT_FILE)
+
+
+# === Сохранение ответа ===
+def save_result(chat_id, gender, age, track_id, rating):
+    wb = openpyxl.load_workbook(RESULT_FILE)
+    ws = wb.active
+    ws.append([chat_id, gender, age, track_id, rating])
+    wb.save(RESULT_FILE)
+
+
+# === Приветствие ===
 @bot.message_handler(func=lambda message: message.chat.id not in user_metadata)
 def welcome_handler(message):
     chat_id = message.chat.id
-
-    # Убираем клавиатуру, если была
     remove_kb = types.ReplyKeyboardRemove()
-    bot.send_message(chat_id, "👋 Добро пожаловать в музыкальный тест!", reply_markup=remove_kb)
 
-    # Сообщение с описанием и кнопкой
-    welcome_text = (
+    bot.send_message(chat_id, "👋 Добро пожаловать в музыкальный тест!", reply_markup=remove_kb)
+    bot.send_message(
+        chat_id,
         "Ты услышишь несколько коротких треков. Оцени каждый по шкале от 1 до 5:\n\n"
         "Но сначала давай познакомимся 🙂"
     )
 
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🚀 Начать", callback_data="start_test"))
+    user_metadata[chat_id] = None
 
-    bot.send_message(chat_id, welcome_text, reply_markup=kb)
-    user_metadata[chat_id] = None  # чтобы не повторялось
 
-# Обработка нажатия кнопки "Начать"
-@bot.callback_query_handler(func=lambda call: call.data == 'start_test')
+# === Кнопка «Начать» ===
+@bot.callback_query_handler(func=lambda call: call.data == "start_test")
 def handle_start_button(call):
     chat_id = call.message.chat.id
-
-    # Удаляем кнопку (оставляя сообщение)
     bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
-
-    # Запускаем сценарий
-    user_metadata[chat_id] = {}
-    user_progress[chat_id] = 0
-    user_rated_tracks[chat_id] = set()
     ask_gender(chat_id)
 
-# Запрос пола
+
 def ask_gender(chat_id):
-    kb = types.InlineKeyboardMarkup()
-    kb.add(
-        types.InlineKeyboardButton("Мужской", callback_data="gender_M"),
-        types.InlineKeyboardButton("Женский", callback_data="gender_F")
-    )
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    kb.add("👨 Мужчина", "👩 Женщина")
     bot.send_message(chat_id, "Укажи свой пол:", reply_markup=kb)
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("gender_"))
-def handle_gender(c):
-    chat_id = c.message.chat.id
-    user_metadata[chat_id]['gender'] = c.data.split('_',1)[1]
-    bot.delete_message(chat_id, c.message.message_id)
+
+@bot.message_handler(func=lambda message: message.text in ["👨 Мужчина", "👩 Женщина"])
+def handle_gender(message):
+    chat_id = message.chat.id
+    gender = "M" if "Мужчина" in message.text else "F"
+    user_metadata[chat_id] = {"gender": gender}
     ask_age(chat_id)
 
+
 def ask_age(chat_id):
-    opts = ["до 24","25-34","35-44","45-54","55+"]
-    kb = types.InlineKeyboardMarkup(row_width=3)
-    for o in opts:
-        kb.add(types.InlineKeyboardButton(o, callback_data=f"age_{o}"))
-    bot.send_message(chat_id, "Укажи свой возраст:", reply_markup=kb)
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    kb.add("18-24", "25-34", "35-44", "45+")
+    bot.send_message(chat_id, "Выбери свой возраст:", reply_markup=kb)
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("age_"))
-def handle_age(c):
-    chat_id = c.message.chat.id
-    user_metadata[chat_id]['age'] = c.data.split('_',1)[1]
-    bot.delete_message(chat_id, c.message.message_id)
 
-    # --- выделяем столбец ---
-    headers = sheet.row_values(1)
-    col = len(headers) + 1
-    user_column[chat_id] = col
+@bot.message_handler(func=lambda message: message.text in ["18-24", "25-34", "35-44", "45+"])
+def handle_age(message):
+    chat_id = message.chat.id
+    user_metadata[chat_id]["age"] = message.text
+    user_progress[chat_id] = 0
+    user_rated_tracks[chat_id] = set()
+    bot.send_message(chat_id, "✅ Отлично! Начнём тест.", reply_markup=types.ReplyKeyboardRemove())
+    send_track(chat_id)
 
-    # --- пишем демографию ---
-    insert_values_into_column(sheet, col, [
-        user_metadata[chat_id]['gender'],
-        user_metadata[chat_id]['age']
-    ])
 
-    # --- инициализируем в этом столбце номера+названия треков ---
-    # (строки 3.. )
-    track_rows = sheet.get_all_values()[2:]  # skip first 2
-    # если ещё пусто — заполняем
-    if not any(track_rows and row[0] for row in track_rows):
-        for num, title in track_data.items():
-            r = int(num) + 2
-            sheet.update_cell(r, 1, num)
-            sheet.update_cell(r, 2, title)
-
-    # --- запускаем тест ---
-    user_progress[chat_id] = 1
-    bot.send_message(chat_id, "Оцени трек от 1 до 5:\n\n1 — Не нравится\n2 — Раньше нравилась, но надоела\n3 — Нейтрально\n4 — Нравится\n5 — Любимая ппесня")
-    send_next_track(chat_id)
-
-# === Отправка и оценка треков ===
-def send_next_track(chat_id):
-    n = user_progress.get(chat_id,1)
-    path = os.path.join(AUDIO_FOLDER,f"{n:03}.mp3")
-    if not os.path.exists(path):
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("Начать сначала", callback_data="restart"))
-        bot.send_message(chat_id, "Тест завершён. Спасибо!", reply_markup=kb)
+# === Отправка трека ===
+def send_track(chat_id):
+    index = user_progress[chat_id]
+    if index >= len(TRACK_LIST):
+        bot.send_message(chat_id, "🎉 Спасибо! Ты прошёл тест.")
         return
 
-    # отправляем аудио
-    with open(path,'rb') as f:
-        m = bot.send_audio(chat_id,f,caption=f"Трек №{n}")
-        last_audios[chat_id] = m.message_id
+    track_file = TRACK_LIST[index]
+    track_path = os.path.join(TRACKS_DIR, track_file)
 
-    # кнопки
-    kb = types.InlineKeyboardMarkup(row_width=5)
-    for i in range(1,6):
-        kb.add(types.InlineKeyboardButton(str(i),callback_data=f"rate_{i}"))
-    bot.send_message(chat_id,"Оцените:",reply_markup=kb)
+    with open(track_path, "rb") as f:
+        bot.send_audio(chat_id, f, title=f"Трек {index+1}")
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("rate_"))
-def handle_rate(c):
-    chat_id = c.message.chat.id
-    n = user_progress.get(chat_id,1)
-    if n in user_rated_tracks[chat_id]:
-        bot.answer_callback_query(c.id,"Уже оценено",show_alert=True)
-        return
+    kb = types.InlineKeyboardMarkup()
+    kb.add(
+        types.InlineKeyboardButton("1. Не нравится", callback_data=f"rate_{index}_1"),
+        types.InlineKeyboardButton("2. Раньше нравилась, но надоела", callback_data=f"rate_{index}_2")
+    )
+    kb.add(
+        types.InlineKeyboardButton("3. Нейтрально", callback_data=f"rate_{index}_3"),
+        types.InlineKeyboardButton("4. Нравится", callback_data=f"rate_{index}_4")
+    )
+    kb.add(
+        types.InlineKeyboardButton("5. Любимая песня", callback_data=f"rate_{index}_5")
+    )
 
-    score = c.data.split('_',1)[1]
-    col = user_column[chat_id]
-    # записываем оценку в строку n+2
-    sheet.update_cell(n+2, col, score)
-
-    user_rated_tracks[chat_id].add(n)
-    # удаляем сообщение с аудио и кнопками
-    try: bot.delete_message(chat_id, last_audios[chat_id])
-    except: pass
-    try: bot.delete_message(chat_id, c.message.message_id)
-    except: pass
-
-    user_progress[chat_id] = n+1
-    send_next_track(chat_id)
-
-@bot.callback_query_handler(func=lambda c: c.data=="restart")
-def handle_restart(c):
-    chat_id = c.message.chat.id
-    bot.delete_message(chat_id, c.message.message_id)
-    start(c.message)
-
-@bot.message_handler(func=lambda m: True)
-def fallback(m):
-    bot.send_message(m.chat.id,"Нажмите /start")
-
-bot.polling()
+    bot.
