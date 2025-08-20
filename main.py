@@ -166,6 +166,6 @@ def send_results(message):
 
 
 # === Запуск ===
-if name == "__main__":
+if __name__ == "__main__":
     print("Бот запущен...")
     bot.infinity_polling()
