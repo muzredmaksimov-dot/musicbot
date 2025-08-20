@@ -1,0 +1,6 @@
+pyTelegramBotAPI
+Flask
+gunicorn
+gspread
+oauth2client
+openpyxl
