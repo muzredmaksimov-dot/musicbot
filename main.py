@@ -121,4 +121,51 @@ def send_track(chat_id):
         types.InlineKeyboardButton("5. Любимая песня", callback_data=f"rate_{index}_5")
     )
 
-    bot.
+    bot.send_message(chat_id, "Твоя оценка:", reply_markup=kb)
+
+
+# === Обработка оценки ===
+@bot.callback_query_handler(func=lambda call: call.data.startswith("rate_"))
+def handle_rating(call):
+    chat_id = call.message.chat.id
+    parts = call.data.split("_")
+    track_index = int(parts[1])
+    rating = int(parts[2])
+
+    if track_index in user_rated_tracks[chat_id]:
+        bot.answer_callback_query(call.id, "Ты уже оценил этот трек")
+        return
+
+    gender = user_metadata[chat_id]["gender"]
+    age = user_metadata[chat_id]["age"]
+    track_id = TRACK_LIST[track_index]
+
+    save_result(chat_id, gender, age, track_id, rating)
+    user_rated_tracks[chat_id].add(track_index)
+
+    bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
+    bot.answer_callback_query(call.id, f"Твоя оценка: {rating}")
+
+    user_progress[chat_id] += 1
+    send_track(chat_id)
+
+
+# === Команда для скачивания Excel ===
+@bot.message_handler(commands=["results"])
+def send_results(message):
+    chat_id = message.chat.id
+    if chat_id != ADMIN_ID:
+        bot.send_message(chat_id, "⛔ У вас нет доступа.")
+        return
+
+    try:
+        with open(RESULT_FILE, "rb") as f:
+            bot.send_document(chat_id, f)
+    except FileNotFoundError:
+        bot.send_message(chat_id, "Файл результатов пуст.")
+
+
+# === Запуск ===
+if name == "__main__":
+    print("Бот запущен...")
+    bot.infinity_polling()
