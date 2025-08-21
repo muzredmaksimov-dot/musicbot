@@ -2,53 +2,42 @@ import telebot
 from telebot import types
 import openpyxl
 import os
+import threading
+from flask import Flask
 
-# === Токен бота ===
+# === Настройки ===
 TOKEN = "8109304672:AAHkOQ8kzQLmHupii78YCd-1Q4HtDKWuuNk"
 bot = telebot.TeleBot(TOKEN)
 
-# === ID администратора (твой) ===
-ADMIN_ID = 866964827
+FILE_NAME = "results.xlsx"
 
-# === Папка с треками ===
-TRACKS_DIR = "tracks"
-TRACK_LIST = sorted([f for f in os.listdir(TRACKS_DIR) if f.endswith(".mp3")])
-
-# === Хранилище данных пользователей ===
-user_metadata = {}       # {chat_id: {"gender": "..", "age": ".."}}
-user_progress = {}       # {chat_id: индекс трека}
-user_rated_tracks = {}   # {chat_id: set(track_id)}
-
-# === Файл для сохранения результатов ===
-RESULT_FILE = "results.xlsx"
-
-# Создаём Excel, если его нет
-if not os.path.exists(RESULT_FILE):
+# Проверяем, есть ли файл, если нет — создаём
+if not os.path.exists(FILE_NAME):
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = "Results"
-    ws.append(["ChatID", "Gender", "Age", "TrackID", "Rating"])
-    wb.save(RESULT_FILE)
+    ws.title = "Результаты"
+    ws.append(["ChatID", "Пол", "Возраст", "Оценка"])
+    wb.save(FILE_NAME)
 
-
-# === Сохранение ответа ===
-def save_result(chat_id, gender, age, track_id, rating):
-    wb = openpyxl.load_workbook(RESULT_FILE)
-    ws = wb.active
-    ws.append([chat_id, gender, age, track_id, rating])
-    wb.save(RESULT_FILE)
-
+# Хранилище для прогресса
+user_metadata = {}
+user_progress = {}
+user_rated_tracks = {}
 
 # === Приветствие ===
 @bot.message_handler(func=lambda message: message.chat.id not in user_metadata)
 def welcome_handler(message):
     chat_id = message.chat.id
-    remove_kb = types.ReplyKeyboardRemove()
-
-    bot.send_message(chat_id, "👋 Добро пожаловать в музыкальный тест!", reply_markup=remove_kb)
     bot.send_message(
         chat_id,
-        "Ты услышишь несколько коротких треков. Оцени каждый по шкале от 1 до 5:\n\n"
+        "👋 Добро пожаловать в музыкальный тест!\n\n"
+        "Ты услышишь несколько коротких треков. "
+        "Оцени каждый по шкале от 1 до 5:\n\n"
+        "1. Не нравится\n"
+        "2. Раньше нравилась, но надоела\n"
+        "3. Нейтрально\n"
+        "4. Нравится\n"
+        "5. Любимая песня\n\n"
         "Но сначала давай познакомимся 🙂"
     )
 
@@ -56,116 +45,82 @@ def welcome_handler(message):
     kb.add(types.InlineKeyboardButton("🚀 Начать", callback_data="start_test"))
     user_metadata[chat_id] = None
 
-
-# === Кнопка «Начать» ===
 @bot.callback_query_handler(func=lambda call: call.data == "start_test")
 def handle_start_button(call):
     chat_id = call.message.chat.id
     bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
-    ask_gender(chat_id)
-
-
-def ask_gender(chat_id):
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    kb.add("👨 Мужчина", "👩 Женщина")
-    bot.send_message(chat_id, "Укажи свой пол:", reply_markup=kb)
-
-
-@bot.message_handler(func=lambda message: message.text in ["👨 Мужчина", "👩 Женщина"])
-def handle_gender(message):
-    chat_id = message.chat.id
-    gender = "M" if "Мужчина" in message.text else "F"
-    user_metadata[chat_id] = {"gender": gender}
-    ask_age(chat_id)
-
-
-def ask_age(chat_id):
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    kb.add("18-24", "25-34", "35-44", "45+")
-    bot.send_message(chat_id, "Выбери свой возраст:", reply_markup=kb)
-
-
-@bot.message_handler(func=lambda message: message.text in ["18-24", "25-34", "35-44", "45+"])
-def handle_age(message):
-    chat_id = message.chat.id
-    user_metadata[chat_id]["age"] = message.text
+    user_metadata[chat_id] = {}
     user_progress[chat_id] = 0
     user_rated_tracks[chat_id] = set()
-    bot.send_message(chat_id, "✅ Отлично! Начнём тест.", reply_markup=types.ReplyKeyboardRemove())
-    send_track(chat_id)
+    ask_gender(chat_id)
 
-
-# === Отправка трека ===
-def send_track(chat_id):
-    index = user_progress[chat_id]
-    if index >= len(TRACK_LIST):
-        bot.send_message(chat_id, "🎉 Спасибо! Ты прошёл тест.")
-        return
-
-    track_file = TRACK_LIST[index]
-    track_path = os.path.join(TRACKS_DIR, track_file)
-
-    with open(track_path, "rb") as f:
-        bot.send_audio(chat_id, f, title=f"Трек {index+1}")
-
+# === Пол ===
+def ask_gender(chat_id):
     kb = types.InlineKeyboardMarkup()
     kb.add(
-        types.InlineKeyboardButton("1. Не нравится", callback_data=f"rate_{index}_1"),
-        types.InlineKeyboardButton("2. Раньше нравилась, но надоела", callback_data=f"rate_{index}_2")
+        types.InlineKeyboardButton("Мужской", callback_data="gender_M"),
+        types.InlineKeyboardButton("Женский", callback_data="gender_F"),
     )
-    kb.add(
-        types.InlineKeyboardButton("3. Нейтрально", callback_data=f"rate_{index}_3"),
-        types.InlineKeyboardButton("4. Нравится", callback_data=f"rate_{index}_4")
-    )
-    kb.add(
-        types.InlineKeyboardButton("5. Любимая песня", callback_data=f"rate_{index}_5")
-    )
+    bot.send_message(chat_id, "Укажите ваш пол:", reply_markup=kb)
 
-    bot.send_message(chat_id, "Твоя оценка:", reply_markup=kb)
+@bot.callback_query_handler(func=lambda call: call.data.startswith("gender_"))
+def handle_gender(call):
+    chat_id = call.message.chat.id
+    gender = "М" if call.data == "gender_M" else "Ж"
+    user_metadata[chat_id]["gender"] = gender
+    bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
+    ask_age(chat_id)
 
+# === Возраст ===
+def ask_age(chat_id):
+    bot.send_message(chat_id, "Введите ваш возраст цифрами:")
 
-# === Обработка оценки ===
+@bot.message_handler(func=lambda message: message.chat.id in user_metadata and "gender" in user_metadata[message.chat.id] and "age" not in user_metadata[message.chat.id])
+def handle_age(message):
+    chat_id = message.chat.id
+    if not message.text.isdigit():
+        bot.send_message(chat_id, "Пожалуйста, введите возраст цифрами 🙂")
+        return
+    age = int(message.text)
+    user_metadata[chat_id]["age"] = age
+    bot.send_message(chat_id, "Спасибо! Теперь начнем тест 🎧")
+    ask_rating(chat_id)
+
+# === Оценка ===
+def ask_rating(chat_id):
+    kb = types.InlineKeyboardMarkup()
+    for i in range(1, 6):
+        kb.add(types.InlineKeyboardButton(str(i), callback_data=f"rate_{i}"))
+    bot.send_message(chat_id, "Оцените этот трек:", reply_markup=kb)
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("rate_"))
 def handle_rating(call):
     chat_id = call.message.chat.id
-    parts = call.data.split("_")
-    track_index = int(parts[1])
-    rating = int(parts[2])
+    rating = int(call.data.split("_")[1])
 
-    if track_index in user_rated_tracks[chat_id]:
-        bot.answer_callback_query(call.id, "Ты уже оценил этот трек")
-        return
+    gender = user_metadata[chat_id].get("gender", "")
+    age = user_metadata[chat_id].get("age", "")
 
-    gender = user_metadata[chat_id]["gender"]
-    age = user_metadata[chat_id]["age"]
-    track_id = TRACK_LIST[track_index]
-
-    save_result(chat_id, gender, age, track_id, rating)
-    user_rated_tracks[chat_id].add(track_index)
+    wb = openpyxl.load_workbook(FILE_NAME)
+    ws = wb.active
+    ws.append([chat_id, gender, age, rating])
+    wb.save(FILE_NAME)
 
     bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
-    bot.answer_callback_query(call.id, f"Твоя оценка: {rating}")
+    bot.send_message(chat_id, f"Ваша оценка: {rating}")
 
-    user_progress[chat_id] += 1
-    send_track(chat_id)
+    ask_rating(chat_id)  # пока зациклено, можно потом ограничить
 
+# === Flask сервер для Render ===
+app = Flask(__name__)
 
-# === Команда для скачивания Excel ===
-@bot.message_handler(commands=["results"])
-def send_results(message):
-    chat_id = message.chat.id
-    if chat_id != ADMIN_ID:
-        bot.send_message(chat_id, "⛔ У вас нет доступа.")
-        return
+@app.route("/")
+def home():
+    return "Bot is running!"
 
-    try:
-        with open(RESULT_FILE, "rb") as f:
-            bot.send_document(chat_id, f)
-    except FileNotFoundError:
-        bot.send_message(chat_id, "Файл результатов пуст.")
+def run_flask():
+    app.run(host="0.0.0.0", port=10000)
 
-
-# === Запуск ===
-if __name__ == "__main__":
-    print("Бот запущен...")
-    bot.infinity_polling()
+if name == "__main__":
+    threading.Thread(target=run_flask).start()
+    bot.polling(none_stop=True, interval=0)
