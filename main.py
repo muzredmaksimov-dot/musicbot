@@ -118,7 +118,7 @@ def webhook():
 def index():
     return "Бот работает на Render 🚀", 200
 
-if name == "__main__":
+if __name__ == "__main__":
     init_excel()
     port = int(os.environ.get("PORT", 5000))
     bot.remove_webhook()
