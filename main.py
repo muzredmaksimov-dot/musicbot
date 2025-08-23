@@ -100,11 +100,11 @@ def has_user_completed(chat_id):
     conn.close()
     return result and result[0] == 1
 
-# === ЭКСПОРТ В EXCEL ===
-def export_to_excel():
+# === ЭКСПОРТ В CSV ===
+def export_to_csv():
     conn = sqlite3.connect('database.db')
     
-    # Создаем CSV файлы
+    # Экспорт пользователей
     with open('users_export.csv', 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(['User ID', 'Username', 'First Name', 'Last Name', 'Gender', 'Age', 'Registration Date', 'Completed'])
@@ -114,6 +114,7 @@ def export_to_excel():
         for row in c.fetchall():
             writer.writerow(row)
     
+    # Экспорт оценок
     with open('ratings_export.csv', 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(['ID', 'User ID', 'Track Number', 'Rating', 'Timestamp'])
@@ -123,22 +124,20 @@ def export_to_excel():
         for row in c.fetchall():
             writer.writerow(row)
     
-    conn.close()
+    # Создаем объединенный файл для удобства
+    with open('combined_results.csv', 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(['User ID', 'Username', 'Gender', 'Age', 'Track Number', 'Rating', 'Timestamp'])
+        
+        c = conn.cursor()
+        c.execute('''SELECT u.chat_id, u.username, u.gender, u.age, r.track_number, r.rating, r.timestamp 
+                     FROM users u JOIN ratings r ON u.chat_id = r.chat_id 
+                     ORDER BY u.chat_id, r.track_number''')
+        for row in c.fetchall():
+            writer.writerow(row)
     
-    # Конвертируем CSV в XLSX (простой способ)
-    import pandas as pd
-    try:
-        users_df = pd.read_csv('users_export.csv')
-        ratings_df = pd.read_csv('ratings_export.csv')
-        
-        with pd.ExcelWriter('results.xlsx') as writer:
-            users_df.to_excel(writer, sheet_name='Users', index=False)
-            ratings_df.to_excel(writer, sheet_name='Ratings', index=False)
-        
-        return True
-    except:
-        # Если pandas не установлен, возвращаем CSV
-        return False
+    conn.close()
+    return True
 
 # === СПИСОК ТРЕКОВ ===
 track_numbers = [f"{str(i).zfill(3)}" for i in range(1, 31)]
@@ -452,15 +451,12 @@ def export_results(message):
         return
     
     try:
-        success = export_to_excel()
-        if success:
-            with open("results.xlsx", "rb") as f:
-                bot.send_document(ADMIN_CHAT_ID, f, caption="📊 Результаты в Excel")
-        else:
-            # Отправляем CSV если Excel не получился
-            with open("users_export.csv", "rb") as f1, open("ratings_export.csv", "rb") as f2:
-                bot.send_document(ADMIN_CHAT_ID, f1, caption="📊 Пользователи (CSV)")
-                bot.send_document(ADMIN_CHAT_ID, f2, caption="📈 Оценки (CSV)")
+        export_to_csv()
+        # Отправляем все CSV файлы
+        with open("users_export.csv", "rb") as f1, open("ratings_export.csv", "rb") as f2, open("combined_results.csv", "rb") as f3:
+            bot.send_document(ADMIN_CHAT_ID, f1, caption="📊 Пользователи (CSV)")
+            bot.send_document(ADMIN_CHAT_ID, f2, caption="📈 Оценки (CSV)")
+            bot.send_document(ADMIN_CHAT_ID, f3, caption="📋 Объединенные результаты (CSV)")
     except Exception as e:
         bot.send_message(ADMIN_CHAT_ID, f"❌ Ошибка при экспорте: {e}")
 
