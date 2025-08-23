@@ -2,13 +2,14 @@ import os
 import telebot
 import sqlite3
 import time
+import csv
 from telebot import types
 from flask import Flask, request
 from datetime import datetime
 
 # === НАСТРОЙКИ ===
 TOKEN = "8109304672:AAHkOQ8kzQLmHupii78YCd-1Q4HtDKWuuNk"
-ADMIN_CHAT_ID = "866964827"  # ID администратора: Андрей (@andrei_jose01)
+ADMIN_CHAT_ID = "866964827"
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
@@ -17,7 +18,6 @@ def init_db():
     conn = sqlite3.connect('database.db')
     c = conn.cursor()
     
-    # Таблица пользователей
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (chat_id INTEGER PRIMARY KEY, 
                   username TEXT, 
@@ -28,7 +28,6 @@ def init_db():
                   registration_date TEXT,
                   completed INTEGER DEFAULT 0)''')
     
-    # Таблица оценок
     c.execute('''CREATE TABLE IF NOT EXISTS ratings
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   chat_id INTEGER,
@@ -101,8 +100,51 @@ def has_user_completed(chat_id):
     conn.close()
     return result and result[0] == 1
 
+# === ЭКСПОРТ В EXCEL ===
+def export_to_excel():
+    conn = sqlite3.connect('database.db')
+    
+    # Создаем CSV файлы
+    with open('users_export.csv', 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(['User ID', 'Username', 'First Name', 'Last Name', 'Gender', 'Age', 'Registration Date', 'Completed'])
+        
+        c = conn.cursor()
+        c.execute("SELECT * FROM users")
+        for row in c.fetchall():
+            writer.writerow(row)
+    
+    with open('ratings_export.csv', 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(['ID', 'User ID', 'Track Number', 'Rating', 'Timestamp'])
+        
+        c = conn.cursor()
+        c.execute("SELECT * FROM ratings")
+        for row in c.fetchall():
+            writer.writerow(row)
+    
+    conn.close()
+    
+    # Конвертируем CSV в XLSX (простой способ)
+    import pandas as pd
+    try:
+        users_df = pd.read_csv('users_export.csv')
+        ratings_df = pd.read_csv('ratings_export.csv')
+        
+        with pd.ExcelWriter('results.xlsx') as writer:
+            users_df.to_excel(writer, sheet_name='Users', index=False)
+            ratings_df.to_excel(writer, sheet_name='Ratings', index=False)
+        
+        return True
+    except:
+        # Если pandas не установлен, возвращаем CSV
+        return False
+
 # === СПИСОК ТРЕКОВ ===
 track_numbers = [f"{str(i).zfill(3)}" for i in range(1, 31)]
+
+# === ХРАНИЛИЩЕ ДЛЯ УДАЛЕНИЯ СООБЩЕНИЙ ===
+user_last_message = {}
 
 # === ОБРАБОТКА КОМАНД ===
 @bot.message_handler(commands=['start'])
@@ -110,20 +152,23 @@ def handle_start(message):
     chat_id = message.chat.id
     user = message.from_user
     
+    # Удаляем предыдущие сообщения
+    cleanup_chat(chat_id)
+    
     save_user(chat_id, user.username, user.first_name, user.last_name, "", "")
     
     if has_user_completed(chat_id):
-        bot.send_message(chat_id, "🎉 Вы уже завершили тест! Спасибо за участие.")
+        send_message(chat_id, "🎉 Вы уже завершили тест! Спасибо за участие.")
         return
     
     progress = get_user_progress(chat_id)
     
     if progress > 0:
-        bot.send_message(chat_id, f"Продолжим тест! 🎵 (Прогресс: {progress}/30)")
+        send_message(chat_id, f"Продолжим тест! 🎵 (Прогресс: {progress}/30)")
         send_track(chat_id, progress)
     else:
         remove_kb = types.ReplyKeyboardRemove()
-        bot.send_message(chat_id, "👋 Добро пожаловать в музыкальный тест!", reply_markup=remove_kb)
+        send_message(chat_id, "👋 Добро пожаловать в музыкальный тест!", reply_markup=remove_kb)
 
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton("🚀 Начать тест", callback_data="start_test"))
@@ -140,7 +185,32 @@ def handle_start(message):
             "🎁 После теста среди всех участников будет розыгрыш подарков!"
         )
         
-        bot.send_message(chat_id, welcome_text, reply_markup=kb)
+        send_message(chat_id, welcome_text, reply_markup=kb)
+
+# === ФУНКЦИЯ ДЛЯ ОТПРАВКИ И СОХРАНЕНИЯ СООБЩЕНИЙ ===
+def send_message(chat_id, text, reply_markup=None):
+    try:
+        msg = bot.send_message(chat_id, text, reply_markup=reply_markup)
+        # Сохраняем ID последнего сообщения
+        if chat_id not in user_last_message:
+            user_last_message[chat_id] = []
+        user_last_message[chat_id].append(msg.message_id)
+        return msg
+    except Exception as e:
+        print(f"Ошибка отправки сообщения: {e}")
+
+# === ОЧИСТКА ЧАТА ===
+def cleanup_chat(chat_id):
+    if chat_id in user_last_message:
+        try:
+            for msg_id in user_last_message[chat_id]:
+                try:
+                    bot.delete_message(chat_id, msg_id)
+                except:
+                    pass
+            user_last_message[chat_id] = []
+        except:
+            pass
 
 @bot.callback_query_handler(func=lambda call: call.data == 'start_test')
 def handle_start_button(call):
@@ -149,6 +219,9 @@ def handle_start_button(call):
         bot.delete_message(chat_id, call.message.message_id)
     except:
         pass
+    
+    # Очищаем предыдущие сообщения
+    cleanup_chat(chat_id)
     
     ask_gender(chat_id)
 
@@ -159,7 +232,7 @@ def ask_gender(chat_id):
         types.InlineKeyboardButton("Мужской", callback_data="gender_Мужской"),
         types.InlineKeyboardButton("Женский", callback_data="gender_Женский")
     )
-    bot.send_message(chat_id, "Укажите ваш пол:", reply_markup=kb)
+    send_message(chat_id, "Укажите ваш пол:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("gender_"))
 def handle_gender(c):
@@ -177,6 +250,8 @@ def handle_gender(c):
     except:
         pass
     
+    # Очищаем чат перед следующим вопросом
+    cleanup_chat(chat_id)
     ask_age(chat_id)
 
 def ask_age(chat_id):
@@ -184,7 +259,7 @@ def ask_age(chat_id):
     kb = types.InlineKeyboardMarkup(row_width=2)
     buttons = [types.InlineKeyboardButton(o, callback_data=f"age_{o}") for o in opts]
     kb.add(*buttons)
-    bot.send_message(chat_id, "Укажите ваш возраст:", reply_markup=kb)
+    send_message(chat_id, "Укажите ваш возраст:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("age_"))
 def handle_age(c):
@@ -202,6 +277,9 @@ def handle_age(c):
     except:
         pass
     
+    # Очищаем чат перед началом теста
+    cleanup_chat(chat_id)
+    
     conn = sqlite3.connect('database.db')
     cur = conn.cursor()
     cur.execute("SELECT username, first_name FROM users WHERE chat_id = ?", (chat_id,))
@@ -210,7 +288,7 @@ def handle_age(c):
     
     username_display = f"@{user_info[0]}" if user_info[0] else user_info[1]
     
-    bot.send_message(
+    send_message(
         chat_id, 
         f"Спасибо, {username_display}! 🎶\n\n"
         "Теперь начнем слепой тест. Удачи в розыгрыше! 🎁"
@@ -220,6 +298,9 @@ def handle_age(c):
 
 # === ОТПРАВКА ТРЕКА ===
 def send_track(chat_id, track_index):
+    # Очищаем предыдущие сообщения
+    cleanup_chat(chat_id)
+    
     if track_index >= len(track_numbers):
         conn = sqlite3.connect('database.db')
         cur = conn.cursor()
@@ -229,7 +310,7 @@ def send_track(chat_id, track_index):
         
         username_display = f"@{user_info[0]}" if user_info[0] else user_info[1]
         
-        bot.send_message(
+        send_message(
             chat_id, 
             f"🎉 {username_display}, тест завершён! Спасибо за участие!\n\n"
             "Результаты сохранены. Следите за новостями для розыгрыша подарков! 🎁"
@@ -246,14 +327,21 @@ def send_track(chat_id, track_index):
     
     if os.path.exists(track_path):
         try:
+            # Отправляем только номер текущего трека
+            progress_text = send_message(chat_id, f"🎵 Трек {track_index + 1}/30")
+            
             with open(track_path, 'rb') as audio_file:
-                bot.send_message(chat_id, f"🎵 Трек {track_index + 1}/30")
-                bot.send_audio(chat_id, audio_file, title=f"Трек {track_number}", reply_markup=kb)
+                audio_msg = bot.send_audio(chat_id, audio_file, title=f"Трек {track_number}", reply_markup=kb)
+                # Сохраняем ID аудио сообщения для последующего удаления
+                if chat_id not in user_last_message:
+                    user_last_message[chat_id] = []
+                user_last_message[chat_id].append(audio_msg.message_id)
+                
         except Exception as e:
-            bot.send_message(chat_id, f"❌ Ошибка при отправке трека: {e}")
+            send_message(chat_id, f"❌ Ошибка при отправке трека: {e}")
             send_track(chat_id, track_index + 1)
     else:
-        bot.send_message(chat_id, f"⚠️ Трек {track_number} не найден.")
+        send_message(chat_id, f"⚠️ Трек {track_number} не найден.")
         send_track(chat_id, track_index + 1)
 
 # === ОБРАБОТКА ОЦЕНКИ ===
@@ -282,10 +370,17 @@ def handle_rating(c):
     track_num = int(track_number)
     save_rating(chat_id, track_num, rating)
     
+    # Удаляем сообщение с кнопками
     try:
         bot.delete_message(chat_id, c.message.message_id)
     except:
         pass
+    
+    # Очищаем чат перед следующим треком
+    cleanup_chat(chat_id)
+    
+    # Отправляем подтверждение оценки
+    send_message(chat_id, f"✅ Оценка {rating} принята!")
     
     next_track_index = get_user_progress(chat_id)
     send_track(chat_id, next_track_index)
@@ -341,6 +436,24 @@ def backup_database(message):
             bot.send_document(ADMIN_CHAT_ID, f, caption="🔐 Резервная копия базы данных")
     except Exception as e:
         bot.send_message(ADMIN_CHAT_ID, f"❌ Ошибка при создании бэкапа: {e}")
+
+@bot.message_handler(commands=['results'])
+def export_results(message):
+    if str(message.chat.id) != ADMIN_CHAT_ID:
+        return
+    
+    try:
+        success = export_to_excel()
+        if success:
+            with open("results.xlsx", "rb") as f:
+                bot.send_document(ADMIN_CHAT_ID, f, caption="📊 Результаты в Excel")
+        else:
+            # Отправляем CSV если Excel не получился
+            with open("users_export.csv", "rb") as f1, open("ratings_export.csv", "rb") as f2:
+                bot.send_document(ADMIN_CHAT_ID, f1, caption="📊 Пользователи (CSV)")
+                bot.send_document(ADMIN_CHAT_ID, f2, caption="📈 Оценки (CSV)")
+    except Exception as e:
+        bot.send_message(ADMIN_CHAT_ID, f"❌ Ошибка при экспорте: {e}")
 
 # === FLASK WEBHOOK ===
 @app.route(f"/{TOKEN}", methods=["POST"])
