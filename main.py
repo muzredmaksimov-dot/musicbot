@@ -116,7 +116,7 @@ def send_track(chat_id, track_id):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rate_"))
 def handle_rating(c):
     chat_id = c.message.chat.id
-    _, track_id, rating = c.data.split("_")
+    _, track_id, rating = c.data.split('_')
     track_id = int(track_id)
     rating = int(rating)
 
@@ -124,13 +124,13 @@ def handle_rating(c):
     user_rated_tracks[chat_id].add(track_id)
     user_progress[chat_id] += 1
 
-    # удаляем сообщение с треком и кнопками
     try:
         bot.delete_message(chat_id, c.message.message_id)
     except Exception:
         pass
 
     bot.edit_message_reply_markup(chat_id, c.message.message_id, reply_markup=None)
+    bot.send_message(chat_id, f"✅ Оценка {rating} сохранена.")
     send_track(chat_id, user_progress[chat_id])
 
 # === FLASK ДЛЯ WEBHOOK ===
@@ -146,7 +146,7 @@ def index():
     return "Бот работает на Render 🚀", 200
 
 # === ЗАПУСК БОТА ===
-if __name__ == "__main__":
+if name == "__main__":
     init_excel()
     port = int(os.environ.get("PORT", 5000))
     bot.remove_webhook()
