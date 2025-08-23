@@ -131,7 +131,6 @@ def handle_rating(c):
         pass
 
     bot.edit_message_reply_markup(chat_id, c.message.message_id, reply_markup=None)
-    bot.send_message(chat_id, f"✅ Оценка {rating} сохранена.")
     send_track(chat_id, user_progress[chat_id])
 
 # === FLASK ДЛЯ WEBHOOK ===
