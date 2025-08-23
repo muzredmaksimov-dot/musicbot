@@ -6,7 +6,7 @@ import openpyxl
 
 # === ТОКЕН БОТА ===
 TOKEN = "8109304672:AAHkOQ8kzQLmHupii78YCd-1Q4HtDKWuuNk"
-bot = telebot.TeleBot(TOKEN)
+bot = telebot.TeleBot(TOKEN, threaded=False)
 app = Flask(__name__)
 
 # === ХРАНИЛИЩЕ ДАННЫХ ===
@@ -17,12 +17,7 @@ user_rated_tracks = {}    # chat_id -> set(оценённых треков)
 RESULTS_FILE = "results.xlsx"
 
 # === СПИСОК ТРЕКОВ ===
-track_files = [
-    "tracks/0.mp3",
-    "tracks/1.mp3",
-    "tracks/2.mp3",
-    # ... добавьте остальные файлы
-]
+track_files = [f"tracks/{str(i).zfill(3)}.mp3" for i in range(1, 31)]
 
 # === ИНИЦИАЛИЗАЦИЯ EXCEL ===
 def init_excel():
@@ -51,7 +46,7 @@ def welcome_handler(message):
     kb.add(types.InlineKeyboardButton("🚀 Начать", callback_data="start_test"))
     bot.send_message(
         chat_id,
-        "Ты услышишь несколько коротких треков. Оцени каждый по шкале от 1 до 5:\n\n"
+        "Ты услышишь 30 коротких треков. Оцени каждый по шкале от 1 до 5:\n\n"
         "Но сначала давай познакомимся 🙂",
         reply_markup=kb
     )
@@ -109,8 +104,11 @@ def send_track(chat_id, track_id):
     for i in range(1, 6):
         kb.add(types.InlineKeyboardButton(str(i), callback_data=f"rate_{track_id}_{i}"))
 
-    with open(track_file, 'rb') as f:
-        bot.send_audio(chat_id, f, reply_markup=kb)
+    try:
+        with open(track_file, 'rb') as f:
+            bot.send_audio(chat_id, f, reply_markup=kb)
+    except Exception as e:
+        bot.send_message(chat_id, f"⚠️ Ошибка при отправке трека {track_file}: {e}")
 
 # === ОБРАБОТКА ОЦЕНКИ ===
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rate_"))
@@ -145,5 +143,5 @@ if name == "__main__":
     init_excel()
     port = int(os.environ.get("PORT", 5000))
     bot.remove_webhook()
-    bot.set_webhook(url="https://musicbot-knqj.onrender.com/8109304672:AAHkOQ8kzQLmHupii78YCd-1Q4HtDKWuuNk")
+    bot.set_webhook(url=f"https://musicbot-knqj.onrender.com/{TOKEN}")
     app.run(host="0.0.0.0", port=port)
