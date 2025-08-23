@@ -73,7 +73,6 @@ def save_rating(chat_id, track_number, rating):
                 c.execute("SELECT username, first_name FROM users WHERE chat_id = ?", (chat_id,))
                 user_info = c.fetchone()
                 username = user_info[0] or user_info[1] or "Неизвестный"
-                bot.send_message(ADMIN_CHAT_ID, f"🎉 Пользователь {username} завершил тест!")
             except:
                 pass
     
@@ -349,7 +348,7 @@ def send_track(chat_id, track_index):
         send_message(
             chat_id, 
             f"🎉 {username_display}, тест завершён! Спасибо за участие!\n\n"
-            "Результаты сохранены. Следите за новостями для розыгрыша подарков! 🎁"
+            "Результаты сохранены. Следите за новостями для розыгрыша подарков в @RadioMlR_Efir! 🎁"
         )
         return
     
