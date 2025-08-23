@@ -1,132 +1,101 @@
-import os
 import telebot
-from telebot import types
+import os
+import datetime
 from flask import Flask, request
-import openpyxl
+from openpyxl import Workbook, load_workbook
 
-# === ТОКЕН БОТА ===
-TOKEN = "8109304672:AAHkOQ8kzQLmHupii78YCd-1Q4HtDKWuuNk"
-bot = telebot.TeleBot(TOKEN, threaded=False)
+TOKEN = os.getenv("BOT_TOKEN")  # твой токен из переменных окружения
+bot = telebot.TeleBot(TOKEN)
+
+WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TOKEN}"
+
 app = Flask(__name__)
 
-# === ХРАНИЛИЩЕ ДАННЫХ ===
-user_metadata = {}        # chat_id -> {gender, age}
-user_progress = {}        # chat_id -> текущий трек
-user_rated_tracks = {}    # chat_id -> set(оценённых треков)
+# ======= Плейлист =======
+TRACKS = [f"{str(i).zfill(3)}.mp3" for i in range(1, 31)]
 
-RESULTS_FILE = "results.xlsx"
+# ======= Excel подключение =======
+RESULT_FILE = "results.xlsx"
 
-# === СПИСОК ТРЕКОВ ===
-track_files = [f"tracks/{str(i).zfill(3)}.mp3" for i in range(1, 31)]
-
-# === ИНИЦИАЛИЗАЦИЯ EXCEL ===
-def init_excel():
-    if not os.path.exists(RESULTS_FILE):
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.append(["chat_id", "gender", "age", "track_id", "rating"])
-        wb.save(RESULTS_FILE)
-
-def save_result(chat_id, track_id, rating):
-    wb = openpyxl.load_workbook(RESULTS_FILE)
+if not os.path.exists(RESULT_FILE):
+    wb = Workbook()
     ws = wb.active
-    gender = user_metadata.get(chat_id, {}).get("gender", "")
-    age = user_metadata.get(chat_id, {}).get("age", "")
-    ws.append([chat_id, gender, age, track_id, rating])
-    wb.save(RESULTS_FILE)
+    ws.title = "Results"
+    ws.append(["user_id", "track", "rating", "timestamp"])
+    wb.save(RESULT_FILE)
 
-# === ПРИВЕТСТВИЕ И НАЧАЛО ===
-@bot.message_handler(func=lambda message: message.chat.id not in user_metadata)
-def welcome_handler(message):
+
+def save_result(user_id, track_id, rating):
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    wb = load_workbook(RESULT_FILE)
+    ws = wb.active
+    ws.append([user_id, track_id, rating, timestamp])
+    wb.save(RESULT_FILE)
+
+
+# ======= Хранилище прогресса =======
+user_progress = {}       # chat_id -> текущий индекс
+user_rated_tracks = {}   # chat_id -> множество оценённых треков
+
+
+# ======= Отправка трека =======
+def send_track(chat_id, track_index):
+    if track_index < len(TRACKS):
+        filename = TRACKS[track_index]
+        with open(f"tracks/{filename}", "rb") as f:
+            markup = telebot.types.InlineKeyboardMarkup()
+            buttons = [
+                telebot.types.InlineKeyboardButton(str(i), callback_data=f"rate_{track_index}_{i}")
+                for i in range(1, 6)
+            ]
+            markup.row(*buttons)
+            bot.send_message(chat_id, f"🎶 Трек {track_index+1} из {len(TRACKS)}")
+            bot.send_audio(chat_id, f, title=filename, reply_markup=markup)
+    else:
+        bot.send_message(chat_id, "🎉 Спасибо! Ты оценил все треки.")
+
+
+# ======= Старт =======
+@bot.message_handler(commands=["start"])
+def start(message):
     chat_id = message.chat.id
-    remove_kb = types.ReplyKeyboardRemove()
-    bot.send_message(chat_id, "👋 Добро пожаловать в музыкальный тест!", reply_markup=remove_kb)
-
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🚀 Начать", callback_data="start_test"))
-    bot.send_message(
-        chat_id,
-        "Ты услышишь 30 коротких треков. Оцени каждый по шкале от 1 до 5:\n\n"
-        "Но сначала давай познакомимся 🙂",
-        reply_markup=kb
-    )
-
-# === КНОПКА НАЧАТЬ ===
-@bot.callback_query_handler(func=lambda call: call.data == 'start_test')
-def handle_start_button(call):
-    chat_id = call.message.chat.id
-    bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
-    user_metadata[chat_id] = {}
     user_progress[chat_id] = 0
     user_rated_tracks[chat_id] = set()
-    ask_gender(chat_id)
 
-# === ВЫБОР ПОЛА ===
-def ask_gender(chat_id):
-    kb = types.InlineKeyboardMarkup()
-    kb.add(
-        types.InlineKeyboardButton("Мужчина", callback_data="gender_Мужчина"),
-        types.InlineKeyboardButton("Женщина", callback_data="gender_Женщина")
-    )
-    bot.send_message(chat_id, "Укажи свой пол:", reply_markup=kb)
+    bot.send_message(chat_id, "Привет! 👋 Давай начнём тест.\n\n"
+                              "Вот шкала оценок:\n"
+                              "1️⃣ — совсем не нравится\n"
+                              "2️⃣ — скорее не нравится\n"
+                              "3️⃣ — нейтрально\n"
+                              "4️⃣ — нравится\n"
+                              "5️⃣ — очень нравится ❤️")
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("gender_"))
-def handle_gender(c):
-    chat_id = c.message.chat.id
-    user_metadata[chat_id]['gender'] = c.data.split('_',1)[1]
-    bot.delete_message(chat_id, c.message.message_id)
-    ask_age(chat_id)
+    send_track(chat_id, 0)
 
-# === ВЫБОР ВОЗРАСТА ===
-def ask_age(chat_id):
-    opts = ["до 24","25-34","35-44","45-54","55+"]
-    kb = types.InlineKeyboardMarkup(row_width=3)
-    for o in opts:
-        kb.add(types.InlineKeyboardButton(o, callback_data=f"age_{o}"))
-    bot.send_message(chat_id, "Укажи свой возраст:", reply_markup=kb)
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("age_"))
-def handle_age(c):
-    chat_id = c.message.chat.id
-    user_metadata[chat_id]['age'] = c.data.split('_',1)[1]
-    bot.delete_message(chat_id, c.message.message_id)
-    bot.send_message(chat_id, "Спасибо! 🎶 Сейчас начнём тест.")
-    send_track(chat_id, user_progress[chat_id])
-
-# === ОТПРАВКА ТРЕКА ===
-def send_track(chat_id, track_id):
-    if track_id >= len(track_files):
-        bot.send_message(chat_id, "🎉 Тест завершён! Спасибо за участие.")
-        return
-
-    track_file = track_files[track_id]
-    kb = types.InlineKeyboardMarkup(row_width=5)
-    for i in range(1, 6):
-        kb.add(types.InlineKeyboardButton(str(i), callback_data=f"rate_{track_id}_{i}"))
-
-    try:
-        with open(track_file, 'rb') as f:
-            bot.send_audio(chat_id, f, reply_markup=kb)
-    except Exception as e:
-        bot.send_message(chat_id, f"⚠️ Ошибка при отправке трека {track_file}: {e}")
-
-# === ОБРАБОТКА ОЦЕНКИ ===
+# ======= Обработка оценки =======
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rate_"))
 def handle_rating(c):
     chat_id = c.message.chat.id
-    _, track_id, rating = c.data.split('_')
+    _, track_id, rating = c.data.split("_")
     track_id = int(track_id)
     rating = int(rating)
 
-    save_result(chat_id, track_id, rating)
+    save_result(chat_id, TRACKS[track_id], rating)
     user_rated_tracks[chat_id].add(track_id)
     user_progress[chat_id] += 1
 
-    bot.edit_message_reply_markup(chat_id, c.message.message_id, reply_markup=None)
-    bot.send_message(chat_id, f"✅ Оценка {rating} сохранена.")
+    # удаляем сообщение с кнопками
+    try:
+        bot.delete_message(chat_id, c.message.message_id)
+    except Exception:
+        pass
+
+    # отправляем следующий трек
     send_track(chat_id, user_progress[chat_id])
 
-# === FLASK ДЛЯ WEBHOOK ===
+
+# ======= Flask webhook =======
 @app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
     json_str = request.get_data().decode("UTF-8")
@@ -134,14 +103,13 @@ def webhook():
     bot.process_new_updates([update])
     return "ok", 200
 
-@app.route("/", methods=["GET"])
-def index():
-    return "Бот работает на Render 🚀", 200
 
-# === ЗАПУСК БОТА ===
-if __name__ == "__main__":
-    init_excel()
-    port = int(os.environ.get("PORT", 5000))
+@app.route("/", methods=["GET", "HEAD"])
+def index():
+    return "Bot is running!", 200
+
+
+if name == "__main__":
     bot.remove_webhook()
-    bot.set_webhook(url=f"https://musicbot-knqj.onrender.com/{TOKEN}")
-    app.run(host="0.0.0.0", port=port)
+    bot.set_webhook(url=WEBHOOK_URL)
+    app.run(host="0.0.0.0", port=10000)
