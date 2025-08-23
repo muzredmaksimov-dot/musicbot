@@ -1,4 +1,122 @@
-progress = get_user_progress(chat_id)
+import os
+import telebot
+import sqlite3
+import time
+from telebot import types
+from flask import Flask, request
+from datetime import datetime
+
+# === НАСТРОЙКИ ===
+TOKEN = "8109304672:AAHkOQ8kzQLmHupii78YCd-1Q4HtDKWuuNk"
+ADMIN_CHAT_ID = "866964827"  # ID администратора: Андрей (@andrei_jose01)
+bot = telebot.TeleBot(TOKEN)
+app = Flask(__name__)
+
+# === БАЗА ДАННЫХ ===
+def init_db():
+    conn = sqlite3.connect('database.db')
+    c = conn.cursor()
+    
+    # Таблица пользователей
+    c.execute('''CREATE TABLE IF NOT EXISTS users
+                 (chat_id INTEGER PRIMARY KEY, 
+                  username TEXT, 
+                  first_name TEXT, 
+                  last_name TEXT, 
+                  gender TEXT, 
+                  age TEXT, 
+                  registration_date TEXT,
+                  completed INTEGER DEFAULT 0)''')
+    
+    # Таблица оценок
+    c.execute('''CREATE TABLE IF NOT EXISTS ratings
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  chat_id INTEGER,
+                  track_number INTEGER,
+                  rating INTEGER,
+                  timestamp TEXT,
+                  FOREIGN KEY(chat_id) REFERENCES users(chat_id))''')
+    
+    conn.commit()
+    conn.close()
+    print("✅ База данных инициализирована")
+
+def save_user(chat_id, username, first_name, last_name, gender, age):
+    conn = sqlite3.connect('database.db')
+    c = conn.cursor()
+    
+    c.execute("SELECT * FROM users WHERE chat_id = ?", (chat_id,))
+    if c.fetchone() is None:
+        c.execute("INSERT INTO users (chat_id, username, first_name, last_name, gender, age, registration_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                  (chat_id, username, first_name, last_name, gender, age, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    else:
+        c.execute("UPDATE users SET username=?, first_name=?, last_name=?, gender=?, age=? WHERE chat_id=?",
+                  (username, first_name, last_name, gender, age, chat_id))
+    
+    conn.commit()
+    conn.close()
+
+def save_rating(chat_id, track_number, rating):
+    conn = sqlite3.connect('database.db')
+    c = conn.cursor()
+    
+    c.execute("SELECT * FROM ratings WHERE chat_id = ? AND track_number = ?", (chat_id, track_number))
+    if c.fetchone() is None:
+        c.execute("INSERT INTO ratings (chat_id, track_number, rating, timestamp) VALUES (?, ?, ?, ?)",
+                  (chat_id, track_number, rating, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        
+        c.execute("SELECT COUNT(*) FROM ratings WHERE chat_id = ?", (chat_id,))
+        rated_count = c.fetchone()[0]
+        
+        if rated_count >= 30:
+            c.execute("UPDATE users SET completed = 1 WHERE chat_id = ?", (chat_id,))
+            try:
+                c.execute("SELECT username, first_name FROM users WHERE chat_id = ?", (chat_id,))
+                user_info = c.fetchone()
+                username = user_info[0] or user_info[1] or "Неизвестный"
+                bot.send_message(ADMIN_CHAT_ID, f"🎉 Пользователь {username} завершил тест!")
+            except:
+                pass
+    
+    conn.commit()
+    conn.close()
+
+def get_user_progress(chat_id):
+    conn = sqlite3.connect('database.db')
+    c = conn.cursor()
+    
+    c.execute("SELECT COUNT(*) FROM ratings WHERE chat_id = ?", (chat_id,))
+    progress = c.fetchone()[0]
+    
+    conn.close()
+    return progress
+
+def has_user_completed(chat_id):
+    conn = sqlite3.connect('database.db')
+    c = conn.cursor()
+    
+    c.execute("SELECT completed FROM users WHERE chat_id = ?", (chat_id,))
+    result = c.fetchone()
+    
+    conn.close()
+    return result and result[0] == 1
+
+# === СПИСОК ТРЕКОВ ===
+track_numbers = [f"{str(i).zfill(3)}" for i in range(1, 31)]
+
+# === ОБРАБОТКА КОМАНД ===
+@bot.message_handler(commands=['start'])
+def handle_start(message):
+    chat_id = message.chat.id
+    user = message.from_user
+    
+    save_user(chat_id, user.username, user.first_name, user.last_name, "", "")
+    
+    if has_user_completed(chat_id):
+        bot.send_message(chat_id, "🎉 Вы уже завершили тест! Спасибо за участие.")
+        return
+    
+    progress = get_user_progress(chat_id)
     
     if progress > 0:
         bot.send_message(chat_id, f"Продолжим тест! 🎵 (Прогресс: {progress}/30)")
@@ -239,7 +357,7 @@ def index():
     return "Слепой музыкальный тест бот работает! 🎵", 200
 
 # === ЗАПУСК ===
-if name == "__main__":
+if __name__ == "__main__":
     init_db()
     
     try:
@@ -249,7 +367,8 @@ if name == "__main__":
     
     port = int(os.environ.get("PORT", 5000))
     
-    if not os.environ.get("DEBUG"):bot.remove_webhook()
+    if not os.environ.get("DEBUG"):
+        bot.remove_webhook()
         bot.set_webhook(url=f"https://musicbot-knqj.onrender.com/{TOKEN}")
     
     app.run(host="0.0.0.0", port=port, debug=os.environ.get("DEBUG"))
