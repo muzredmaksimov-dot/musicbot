@@ -144,6 +144,7 @@ track_numbers = [f"{str(i).zfill(3)}" for i in range(1, 31)]
 
 # === ХРАНИЛИЩЕ ДЛЯ УДАЛЕНИЯ СООБЩЕНИЙ ===
 user_last_message = {}
+user_rating_guide = {}  # Храним ID сообщения с расшифровкой оценок для каждого пользователя
 
 # === СООБЩЕНИЕ С РАСШИФРОВКОЙ ОЦЕНОК ===
 RATING_GUIDE_MESSAGE = """
@@ -164,8 +165,8 @@ def handle_start(message):
     chat_id = message.chat.id
     user = message.from_user
     
-    # Удаляем предыдущие сообщения
-    cleanup_chat(chat_id)
+    # Удаляем предыдущие сообщения (кроме расшифровки)
+    cleanup_chat(chat_id, keep_rating_guide=True)
     
     save_user(chat_id, user.username, user.first_name, user.last_name, "", "")
     
@@ -205,18 +206,44 @@ def send_message(chat_id, text, reply_markup=None, parse_mode=None):
     except Exception as e:
         print(f"Ошибка отправки сообщения: {e}")
 
-# === ОЧИСТКА ЧАТА ===
-def cleanup_chat(chat_id):
+# === ОЧИСТКА ЧАТА (С СОХРАНЕНИЕМ РАСШИФРОВКИ) ===
+def cleanup_chat(chat_id, keep_rating_guide=False):
     if chat_id in user_last_message:
         try:
+            # Сохраняем ID сообщения с расшифровкой оценок
+            rating_guide_id = user_rating_guide.get(chat_id)
+            
+            messages_to_keep = []
+            if keep_rating_guide and rating_guide_id:
+                messages_to_keep.append(rating_guide_id)
+            
+            # Удаляем все сообщения кроме тех, что нужно сохранить
             for msg_id in user_last_message[chat_id]:
-                try:
-                    bot.delete_message(chat_id, msg_id)
-                except:
-                    pass
-            user_last_message[chat_id] = []
+                if msg_id not in messages_to_keep:
+                    try:
+                        bot.delete_message(chat_id, msg_id)
+                    except:
+                        pass
+            
+            # Обновляем список сообщений, оставляя только те, что сохранили
+            user_last_message[chat_id] = messages_to_keep
+            
+        except Exception as e:
+            print(f"Ошибка очистки чата: {e}")
+
+# === ОТПРАВКА РАСШИФРОВКИ ОЦЕНОК ===
+def send_rating_guide(chat_id):
+    # Удаляем старую расшифровку если есть
+    if chat_id in user_rating_guide:
+        try:
+            bot.delete_message(chat_id, user_rating_guide[chat_id])
         except:
             pass
+    
+    # Отправляем новую расшифровку
+    msg = send_message(chat_id, RATING_GUIDE_MESSAGE, parse_mode='Markdown')
+    if msg:
+        user_rating_guide[chat_id] = msg.message_id
 
 @bot.callback_query_handler(func=lambda call: call.data == 'start_test')
 def handle_start_button(call):
@@ -235,8 +262,8 @@ def handle_start_button(call):
 def ask_gender(chat_id):
     kb = types.InlineKeyboardMarkup()
     kb.add(
-        types.InlineKeyboardButton("Мужской", callback_data="gender_Мужской"),
-        types.InlineKeyboardButton("Женский", callback_data="gender_Женский")
+        types.InlineKeyboardButton("Мужской", callback_data="gender_M"),
+        types.InlineKeyboardButton("Женский", callback_data="gender_F")
     )
     send_message(chat_id, "Укажите ваш пол:", reply_markup=kb)
 
@@ -300,15 +327,15 @@ def handle_age(c):
         "Теперь начнем слепой тест. Удачи в розыгрыше! 🎁"
     )
     
-    # Отправляем расшифровку оценок один раз в начале
-    send_message(chat_id, RATING_GUIDE_MESSAGE, parse_mode='Markdown')
+    # Отправляем расшифровку оценок
+    send_rating_guide(chat_id)
     
     send_track(chat_id, 0)
 
 # === ОТПРАВКА ТРЕКА ===
 def send_track(chat_id, track_index):
-    # Очищаем предыдущие сообщения, кроме расшифровки оценок
-    cleanup_chat(chat_id)
+    # Очищаем предыдущие сообщения, но сохраняем расшифровку оценок
+    cleanup_chat(chat_id, keep_rating_guide=True)
     
     if track_index >= len(track_numbers):
         conn = sqlite3.connect('database.db')
@@ -385,10 +412,8 @@ def handle_rating(c):
     except:
         pass
     
-    # Очищаем чат перед следующим треком (кроме расшифровки оценок)
-    cleanup_chat(chat_id)
-    
-    # НЕ отправляем подтверждение оценки - сразу переходим к следующему треку
+    # Очищаем чат перед следующим треком, но сохраняем расшифровку оценок
+    cleanup_chat(chat_id, keep_rating_guide=True)
     
     next_track_index = get_user_progress(chat_id)
     send_track(chat_id, next_track_index)
