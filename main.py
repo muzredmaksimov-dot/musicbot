@@ -6,6 +6,7 @@ import os
 from telebot import types
 from datetime import datetime
 from flask import Flask, request
+import json
 
 # === Настройки ===
 TOKEN = '8109304672:AAHkOQ8kzQLmHupii78YCd-1Q4HtDKWuuNk'
@@ -27,30 +28,24 @@ worksheet = None
 track_data = {}
 user_states = {}
 
+# === Функции ===
 def initialize_google_sheets():
-    """Инициализация подключения к Google Таблицам"""
+    """Инициализация подключения к Google Таблицам через переменную окружения"""
     global worksheet
     try:
-        if not os.path.exists('creds.json'):
-            print("❌ Файл creds.json не найден")
+        creds_json_str = os.environ.get('GOOGLE_CREDS_JSON')
+        if not creds_json_str:
+            print("❌ GOOGLE_CREDS_JSON не задан")
             return False
-        
-        import json
-from oauth2client.service_account import ServiceAccountCredentials
-import os
 
-creds_json_str = os.environ.get('creds.json')
-if not creds_json_str:
-    print("❌ creds.json не задан")
-else:
-    creds_dict = json.loads(creds_json_str)
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    client = gspread.authorize(creds)
+        creds_dict = json.loads(creds_json_str)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         spreadsheet = client.open(SPREADSHEET_NAME)
         worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
         print("✅ Успешно подключено к Google Таблице!")
         return True
+
     except Exception as e:
         print(f"❌ Ошибка Google Sheets: {e}")
         return False
@@ -75,32 +70,26 @@ def save_to_google_sheets(user_data, ratings):
         return False
     
     try:
-        # Получаем все данные из таблицы
         all_data = worksheet.get_all_values()
-        
-        # Находим следующий свободный столбец
-        next_col = len(all_data[0]) + 1 if all_data else 1
-        
-        # Подготавливаем данные для записи
+        next_col = len(all_data[0]) + 1 if all_data and all_data[0] else 1
+
         user_info = [
             user_data['user_id'],
-            f"@{user_data['username']}" if user_data.get('username') else '',
+            f"@{user_data.get('username', '')}",
             user_data['gender'],
             user_data['age'],
             datetime.now().isoformat()
         ]
-        
-        # Добавляем оценки для каждого трека
+
         for i in range(1, len(track_data) + 1):
             user_info.append(ratings.get(str(i), ''))
-        
-        # Записываем данные
+
         for row_idx, value in enumerate(user_info, start=1):
             worksheet.update_cell(row_idx, next_col, value)
-        
+
         print(f"✅ Данные сохранены в колонку {next_col}")
         return True
-        
+
     except Exception as e:
         print(f"❌ Ошибка сохранения в Google Таблицу: {e}")
         return False
@@ -109,16 +98,15 @@ def save_to_csv_backup(user_data, ratings):
     """Резервное сохранение в CSV"""
     try:
         file_exists = os.path.exists('backup_results.csv')
-        
         with open('backup_results.csv', 'a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            
+
             if not file_exists:
                 headers = ['user_id', 'username', 'gender', 'age', 'timestamp']
                 for i in range(1, len(track_data) + 1):
                     headers.append(f'track_{i}')
                 writer.writerow(headers)
-            
+
             row_data = [
                 user_data['user_id'],
                 user_data.get('username', ''),
@@ -126,15 +114,15 @@ def save_to_csv_backup(user_data, ratings):
                 user_data['age'],
                 datetime.now().isoformat()
             ]
-            
+
             for i in range(1, len(track_data) + 1):
                 row_data.append(ratings.get(str(i), ''))
-            
+
             writer.writerow(row_data)
-        
+
         print("✅ Данные сохранены в CSV бэкап")
         return True
-        
+
     except Exception as e:
         print(f"❌ Ошибка сохранения в CSV: {e}")
         return False
@@ -149,7 +137,7 @@ def start(message):
         'ratings': {},
         'current_track': 1
     }
-    
+
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🎵 Начать тест", callback_data="start_test"))
     bot.send_message(chat_id, "Добро пожаловать в музыкальный тест! Нажмите кнопку ниже чтобы начать.", reply_markup=kb)
@@ -185,29 +173,25 @@ def handle_age(c):
     chat_id = c.message.chat.id
     user_states[chat_id]['age'] = c.data.split('_')[1]
     bot.delete_message(chat_id, c.message.message_id)
-    
+
     bot.send_message(chat_id, "🎵 Начинаем музыкальный тест!\n\nОцените каждый трек по шкале от 1 до 5 звезд")
     send_track(chat_id)
 
 def send_track(chat_id):
     track_num = user_states[chat_id]['current_track']
     file_path = os.path.join(AUDIO_FOLDER, f"{track_num:03d}.mp3")
-    
+
     if not os.path.exists(file_path):
-        # Тест завершен
         user_data = user_states[chat_id]
-        
-        # Сохраняем результаты
         google_success = save_to_google_sheets(user_data, user_data['ratings'])
         csv_success = save_to_csv_backup(user_data, user_data['ratings'])
-        
+
         if google_success:
             bot.send_message(chat_id, "🎉 Тест завершен! Результаты сохранены в Google Таблицу.")
         elif csv_success:
             bot.send_message(chat_id, "✅ Тест завершен! Результаты сохранены в файл.")
         else:
             bot.send_message(chat_id, "⚠️ Тест завершен! Но возникла ошибка при сохранении.")
-        
         return
 
     try:
@@ -227,10 +211,10 @@ def handle_rating(c):
     chat_id = c.message.chat.id
     rating = int(c.data.split('_')[1])
     track_num = user_states[chat_id]['current_track']
-    
+
     user_states[chat_id]['ratings'][str(track_num)] = rating
     user_states[chat_id]['current_track'] += 1
-    
+
     bot.delete_message(chat_id, c.message.message_id)
     send_track(chat_id)
 
@@ -256,13 +240,12 @@ def index():
 def health():
     return 'OK'
 
+# === Запуск ===
 if __name__ == "__main__":
-    # Инициализация
     print("🚀 Инициализация бота...")
     initialize_google_sheets()
     load_track_data()
-    
-    # Запуск
+
     if 'RENDER' in os.environ:
         print("🌐 Запуск на Render (вебхук)")
         port = int(os.environ.get('PORT', 10000))
