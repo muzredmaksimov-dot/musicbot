@@ -4,6 +4,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import os
 from telebot import types
+from datetime import datetime
 
 # === Настройки ===
 TOKEN = '8109304672:AAHkOQ8kzQLmHupii78YCd-1Q4HtDKWuuNk'
@@ -12,233 +13,215 @@ SPREADSHEET_NAME = 'music_testing'
 WORKSHEET_NAME = 'track_list'
 
 # === Google Sheets авторизация ===
-scope = ["https://spreadsheets.google.com/feeds", 
-         "https://www.googleapis.com/auth/drive",
-         "https://www.googleapis.com/auth/spreadsheets"]
-creds = ServiceAccountCredentials.from_json_keyfile_name("creds.json", scope)
-client = gspread.authorize(creds)
-sheet = client.open(SPREADSHEET_NAME).worksheet(WORKSHEET_NAME)
+scope = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive"
+]
+
+# Проверяем наличие файла creds.json
+if not os.path.exists('creds.json'):
+    print("Ошибка: Файл creds.json не найден!")
+else:
+    try:
+        creds = ServiceAccountCredentials.from_json_keyfile_name('creds.json', scope)
+        client = gspread.authorize(creds)
+        
+        # Открываем таблицу
+        try:
+            spreadsheet = client.open(SPREADSHEET_NAME)
+            worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
+            print("Успешно подключено к Google Таблице!")
+        except gspread.SpreadsheetNotFound:
+            print(f"Таблица '{SPREADSHEET_NAME}' не найдена!")
+        except gspread.WorksheetNotFound:
+            print(f"Лист '{WORKSHEET_NAME}' не найден!")
+            
+    except Exception as e:
+        print(f"Ошибка авторизации: {e}")
 
 # === Загрузка CSV-файла с треками ===
-with open('track_list.csv', newline='', encoding='utf-8') as f:
-    reader = csv.DictReader(f)
-    track_data = {row['track_number']: row['title'] for row in reader}
+try:
+    with open('track_list.csv', newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        track_data = {row['track_number']: row['title'] for row in reader}
+    print(f"Загружено {len(track_data)} треков")
+except FileNotFoundError:
+    track_data = {}
+    print("Предупреждение: track_list.csv не найден")
+except Exception as e:
+    track_data = {}
+    print(f"Ошибка загрузки track_list.csv: {e}")
 
 # === Бот ===
 bot = telebot.TeleBot(TOKEN)
 
 # === Словари состояния ===
-user_progress = {}        # какой трек у кого сейчас
-user_rated_tracks = {}    # что уже оценено
-user_metadata = {}        # пол/возраст
-user_column = {}          # столбец для каждого пользователя
-last_audios = {}          # message_id последнего аудио
+user_states = {}
 
-# === Вспомогательные функции ===
+def save_to_google_sheets(user_data, ratings):
+    """Сохраняет результаты в Google Таблицу"""
+    try:
+        # Получаем все данные из таблицы
+        all_data = worksheet.get_all_values()
+        
+        # Находим следующий свободный столбец
+        if not all_data:
+            next_col = 1
+        else:
+            next_col = len(all_data[0]) + 1
+        
+        # Подготавливаем данные для записи
+        user_info = [
+            user_data['user_id'],
+            f"@{user_data['username']}" if user_data.get('username') else '',
+            user_data['gender'],
+            user_data['age'],
+            user_data['timestamp']
+        ]
+        
+        # Добавляем оценки для каждого трека
+        for i in range(1, len(track_data) + 1):
+            user_info.append(ratings.get(str(i), ''))
+        
+        # Записываем данные
+        for row_idx, value in enumerate(user_info, start=1):
+            worksheet.update_cell(row_idx, next_col, value)
+        
+        print(f"Данные сохранены в колонку {next_col}")
+        return True
+        
+    except Exception as e:
+        print(f"Ошибка сохранения в Google Таблицу: {e}")
+        return False
+
 def prepare_spreadsheet():
-    """Подготавливает структуру таблицы если она пустая"""
-    # Добавляем заголовки если их нет
-    headers = sheet.row_values(1)
-    if not headers:
-        sheet.update('A1', ['Track Number', 'Track Title'])
-    
-    # Заполняем номера и названия треков если их нет
-    all_values = sheet.get_all_values()
-    if len(all_values) < 3:  # Если только заголовки или пусто
-        for num, title in track_data.items():
-            row = int(num) + 2  # +2 потому что первая строка - заголовки, вторая - демография
-            sheet.update_cell(row, 1, num)
-            sheet.update_cell(row, 2, title)
+    """Подготавливает структуру таблицы"""
+    try:
+        # Создаем заголовки если таблица пустая
+        if not worksheet.get_all_values():
+            headers = ['User ID', 'Username', 'Gender', 'Age', 'Timestamp']
+            for i in range(1, len(track_data) + 1):
+                headers.append(f'Track {i}')
+            worksheet.update('A1', [headers])
+            
+            # Заполняем номера и названия треков
+            for num, title in track_data.items():
+                row = int(num) + 1  # +1 потому что первая строка - заголовки
+                worksheet.update_cell(row, 1, f"Track {num}")
+                worksheet.update_cell(row, 2, title)
+                
+        print("Таблица подготовлена")
+        
+    except Exception as e:
+        print(f"Ошибка подготовки таблицы: {e}")
 
-def get_next_available_column():
-    """Находит следующий свободный столбец"""
-    headers = sheet.row_values(1)
-    return len(headers) + 1 if headers else 3
-
-def setup_user_column(chat_id, username):
-    """Настраивает столбец для пользователя"""
-    col = get_next_available_column()
-    user_column[chat_id] = col
-    
-    # Записываем заголовок столбца (username или user_id)
-    header_text = f"@{username}" if username else f"user_{chat_id}"
-    sheet.update_cell(1, col, header_text)
-    
-    # Записываем демографические данные
-    sheet.update_cell(2, col, f"{user_metadata[chat_id]['gender']}, {user_metadata[chat_id]['age']}")
-    
-    return col
-
-# === Опрос перед тестом ===
+# === Обработчики бота ===
 @bot.message_handler(commands=['start'])
 def start(message):
     chat_id = message.chat.id
-    welcome_handler(message)
-
-@bot.message_handler(func=lambda message: message.chat.id not in user_metadata)
-def welcome_handler(message):
-    chat_id = message.chat.id
-
-    # Убираем клавиатуру, если была
-    remove_kb = types.ReplyKeyboardRemove()
-    bot.send_message(chat_id, "👋 Добро пожаловать в музыкальный тест!", reply_markup=remove_kb)
-
-    # Сообщение с описанием и кнопкой
-    welcome_text = (
-        "Ты услышишь несколько коротких треков. Оцени каждый по шкале от 1 до 5:\n\n"
-        "Но сначала давай познакомимся 🙂"
-    )
-
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🚀 Начать", callback_data="start_test"))
-
-    bot.send_message(chat_id, welcome_text, reply_markup=kb)
-    user_metadata[chat_id] = {}  # Инициализируем как словарь
-
-# Обработка нажатия кнопки "Начать"
-@bot.callback_query_handler(func=lambda call: call.data == 'start_test')
-def handle_start_button(call):
-    chat_id = call.message.chat.id
-
-    # Удаляем кнопку (оставляя сообщение)
-    bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
-
-    # Подготавливаем таблицу
-    prepare_spreadsheet()
+    user_states[chat_id] = {
+        'user_id': chat_id,
+        'username': message.from_user.username,
+        'first_name': message.from_user.first_name,
+        'last_name': message.from_user.last_name,
+        'ratings': {},
+        'current_track': 1,
+        'start_time': datetime.now()
+    }
     
-    # Запускаем сценарий
-    user_metadata[chat_id] = {}
-    user_progress[chat_id] = 1  # Начинаем с первого трека
-    user_rated_tracks[chat_id] = set()
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🎵 Начать тест", callback_data="start_test"))
+    bot.send_message(chat_id, "Добро пожаловать в музыкальный тест! Нажмите кнопку ниже чтобы начать.", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda call: call.data == "start_test")
+def start_test(call):
+    chat_id = call.message.chat.id
+    bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
     ask_gender(chat_id)
 
-# Запрос пола
 def ask_gender(chat_id):
     kb = types.InlineKeyboardMarkup()
-    kb.add(
-        types.InlineKeyboardButton("Мужской", callback_data="gender_M"),
-        types.InlineKeyboardButton("Женский", callback_data="gender_F")
-    )
-    bot.send_message(chat_id, "Укажи свой пол:", reply_markup=kb)
+    kb.row(types.InlineKeyboardButton("Мужской", callback_data="gender_M"))
+    kb.row(types.InlineKeyboardButton("Женский", callback_data="gender_F"))
+    bot.send_message(chat_id, "Укажите ваш пол:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("gender_"))
 def handle_gender(c):
     chat_id = c.message.chat.id
-    user_metadata[chat_id]['gender'] = c.data.split('_',1)[1]
+    user_states[chat_id]['gender'] = c.data.split('_')[1]
     bot.delete_message(chat_id, c.message.message_id)
     ask_age(chat_id)
 
 def ask_age(chat_id):
-    opts = ["до 24", "25-34", "35-44", "45-54", "55+"]
-    kb = types.InlineKeyboardMarkup(row_width=3)
-    for o in opts:
-        kb.add(types.InlineKeyboardButton(o, callback_data=f"age_{o}"))
-    bot.send_message(chat_id, "Укажи свой возраст:", reply_markup=kb)
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    ages = ["до 24", "25-34", "35-44", "45-54", "55+"]
+    for age in ages:
+        kb.add(types.InlineKeyboardButton(age, callback_data=f"age_{age}"))
+    bot.send_message(chat_id, "Укажите ваш возраст:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("age_"))
 def handle_age(c):
     chat_id = c.message.chat.id
-    user_metadata[chat_id]['age'] = c.data.split('_',1)[1]
+    user_states[chat_id]['age'] = c.data.split('_')[1]
     bot.delete_message(chat_id, c.message.message_id)
-
-    # Настраиваем столбец для пользователя
-    username = c.from_user.username
-    col = setup_user_column(chat_id, username)
-
-    # Запускаем тест
-    bot.send_message(chat_id, "🎵 Начинаем музыкальный тест!\n\nОцени каждый трек по шкале от 1 до 5:\n\n1 ★ - Совсем не нравится\n2 ★★ - Скорее не нравится\n3 ★★★ - Нейтрально\n4 ★★★★ - Нравится\n5 ★★★★★ - Очень нравится")
-    send_next_track(chat_id)
-
-# === Отправка и оценка треков ===
-def send_next_track(chat_id):
-    n = user_progress.get(chat_id, 1)
-    path = os.path.join(AUDIO_FOLDER, f"{n:03}.mp3")
     
-    if not os.path.exists(path):
+    # Подготавливаем таблицу
+    prepare_spreadsheet()
+    
+    bot.send_message(chat_id, "🎵 Начинаем музыкальный тест!\n\nОцените каждый трек по шкале от 1 до 5 звезд")
+    send_track(chat_id)
+
+def send_track(chat_id):
+    track_num = user_states[chat_id]['current_track']
+    file_path = os.path.join(AUDIO_FOLDER, f"{track_num:03d}.mp3")
+    
+    if not os.path.exists(file_path):
         # Тест завершен
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("Начать сначала", callback_data="restart"))
-        bot.send_message(chat_id, "🎉 Тест завершён! Спасибо за участие!\n\nРезультаты сохранены. Следите за новостями для розыгрыша подарков!", reply_markup=kb)
+        user_data = user_states[chat_id]
+        user_data['timestamp'] = datetime.now().isoformat()
+        user_data['end_time'] = datetime.now()
+        
+        # Сохраняем в Google Таблицу
+        success = save_to_google_sheets(user_data, user_data['ratings'])
+        
+        if success:
+            bot.send_message(chat_id, "🎉 Тест завершен! Результаты сохранены в Google Таблицу.")
+        else:
+            bot.send_message(chat_id, "✅ Тест завершен! Но возникла ошибка при сохранении.")
+        
         return
 
-    # Отправляем аудио
     try:
-        with open(path, 'rb') as f:
-            m = bot.send_audio(chat_id, f, caption=f"Трек №{n}")
-            last_audios[chat_id] = m.message_id
+        with open(file_path, 'rb') as audio_file:
+            bot.send_audio(chat_id, audio_file, caption=f"Трек #{track_num}")
     except Exception as e:
-        bot.send_message(chat_id, f"Ошибка при отправке трека: {e}")
+        bot.send_message(chat_id, f"Ошибка загрузки трека: {e}")
         return
 
-    # Кнопки для оценки
     kb = types.InlineKeyboardMarkup(row_width=5)
-    buttons = []
     for i in range(1, 6):
-        buttons.append(types.InlineKeyboardButton(str(i), callback_data=f"rate_{i}"))
-    kb.add(*buttons)
-    bot.send_message(chat_id, "Оцените этот трек:", reply_markup=kb)
+        kb.add(types.InlineKeyboardButton(f"{i}★", callback_data=f"rate_{i}"))
+    bot.send_message(chat_id, "Оцените трек:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rate_"))
-def handle_rate(c):
+def handle_rating(c):
     chat_id = c.message.chat.id
-    n = user_progress.get(chat_id, 1)
+    rating = int(c.data.split('_')[1])
+    track_num = user_states[chat_id]['current_track']
     
-    if n in user_rated_tracks[chat_id]:
-        bot.answer_callback_query(c.id, "Этот трек уже оценен", show_alert=True)
-        return
-
-    score = c.data.split('_', 1)[1]
-    col = user_column.get(chat_id)
+    user_states[chat_id]['ratings'][str(track_num)] = rating
+    user_states[chat_id]['current_track'] += 1
     
-    if not col:
-        bot.answer_callback_query(c.id, "Ошибка: не найден столбец для сохранения", show_alert=True)
-        return
-
-    # Сохраняем оценку в Google Таблицу (строка = номер трека + 2)
-    try:
-        sheet.update_cell(n + 2, col, score)
-    except Exception as e:
-        bot.answer_callback_query(c.id, f"Ошибка сохранения: {e}", show_alert=True)
-        return
-
-    user_rated_tracks[chat_id].add(n)
-    
-    # Удаляем сообщение с аудио и кнопками
-    try:
-        bot.delete_message(chat_id, last_audios[chat_id])
-    except:
-        pass
-    try:
-        bot.delete_message(chat_id, c.message.message_id)
-    except:
-        pass
-
-    # Переходим к следующему треку
-    user_progress[chat_id] = n + 1
-    send_next_track(chat_id)
-
-@bot.callback_query_handler(func=lambda c: c.data == "restart")
-def handle_restart(c):
-    chat_id = c.message.chat.id
     bot.delete_message(chat_id, c.message.message_id)
-    
-    # Очищаем состояние пользователя
-    if chat_id in user_metadata:
-        del user_metadata[chat_id]
-    if chat_id in user_progress:
-        del user_progress[chat_id]
-    if chat_id in user_rated_tracks:
-        del user_rated_tracks[chat_id]
-    if chat_id in user_column:
-        del user_column[chat_id]
-    
-    # Запускаем заново
-    welcome_handler(c.message)
+    send_track(chat_id)
 
-@bot.message_handler(func=lambda m: True)
-def fallback(m):
-    bot.send_message(m.chat.id, "Для начала теста нажмите /start")
+@bot.message_handler(func=lambda message: True)
+def handle_all_messages(message):
+    bot.send_message(message.chat.id, "Для начала теста нажмите /start")
 
 if __name__ == "__main__":
     print("Бот запущен и готов к работе!")
-    bot.polling(none_stop=True)
+    try:
+        bot.polling(none_stop=True)
+    except Exception as e:
+        print(f"Ошибка запуска бота: {e}")
