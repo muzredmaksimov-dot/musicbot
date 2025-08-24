@@ -194,8 +194,8 @@ def handle_start_button(call):
 def ask_gender(chat_id):
     kb = types.InlineKeyboardMarkup()
     kb.add(
-        types.InlineKeyboardButton("Мужской", callback_data="gender_Мужской"),
-        types.InlineKeyboardButton("Женский", callback_data="gender_Женский")
+        types.InlineKeyboardButton("Мужской", callback_data="gender_M"),
+        types.InlineKeyboardButton("Женский", callback_data="gender_F")
     )
     send_message(chat_id,"Укажите ваш пол:", reply_markup=kb)
 
@@ -225,7 +225,7 @@ def handle_age(c):
     except: pass
     cleanup_chat(chat_id)
     username_display = f"@{user_states[chat_id]['user_data']['username']}" if user_states[chat_id]['user_data']['username'] else user_states[chat_id]['user_data']['first_name']
-    send_message(chat_id,f"Спасибо, {username_display}! 🎶\n\nТеперь начнем слепой тест. Удачи! 🎁")
+    send_message(chat_id,f"Спасибо, {username_display}! 🎶\n\nТеперь начнем тест. Удачи! 🎁")
     send_rating_guide(chat_id)
     send_track(chat_id)
 
@@ -281,7 +281,7 @@ def finish_test(chat_id):
     csv_success = save_to_csv_backup(user_data, ratings)
     username_display = f"@{user_data['username']}" if user_data['username'] else user_data['first_name']
     if google_success:
-        send_message(chat_id,f"🎉 {username_display}, тест завершён! Результаты сохранены в Google Таблицу.\n\nСледите за новостями для розыгрыша подарков! 🎁")
+        send_message(chat_id,f"🎉 {username_display}, тест завершён!\n\nСледи за новостями в @RadioMlR_Efir для розыгрыша подарков! 🎁")
     elif csv_success:
         send_message(chat_id,f"🎉 {username_display}, тест завершён! Результаты сохранены в CSV.\n\nСледите за новостями для розыгрыша подарков! 🎁")
     else:
