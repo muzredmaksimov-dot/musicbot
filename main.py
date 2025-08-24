@@ -65,7 +65,6 @@ def save_to_google_sheets(user_data, ratings):
             user_data.get('last_name',''),
             user_data['gender'],
             user_data['age'],
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ]
 
         for i in range(1,31):
@@ -97,7 +96,6 @@ def save_to_csv_backup(user_data, ratings):
                 user_data.get('last_name',''),
                 user_data['gender'],
                 user_data['age'],
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             ]
             for i in range(1,31):
                 row_data.append(ratings.get(str(i),''))
