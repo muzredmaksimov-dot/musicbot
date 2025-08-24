@@ -5,12 +5,17 @@ from oauth2client.service_account import ServiceAccountCredentials
 import os
 from telebot import types
 from datetime import datetime
+from flask import Flask, request
 
 # === Настройки ===
 TOKEN = '8109304672:AAHkOQ8kzQLmHupii78YCd-1Q4HtDKWuuNk'
 AUDIO_FOLDER = 'audio'
 SPREADSHEET_NAME = 'music_testing'
 WORKSHEET_NAME = 'track_list'
+WEBHOOK_URL = os.environ.get('RENDER_EXTERNAL_URL', '') + '/' + TOKEN
+
+# === Инициализация Flask ===
+app = Flask(__name__)
 
 # === Google Sheets авторизация ===
 scope = [
@@ -18,48 +23,50 @@ scope = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-# Проверяем наличие файла creds.json
-if not os.path.exists('creds.json'):
-    print("Ошибка: Файл creds.json не найден!")
-else:
-    try:
-        creds = ServiceAccountCredentials.from_json_keyfile_name('creds.json', scope)
-        client = gspread.authorize(creds)
-        
-        # Открываем таблицу
+# Глобальные переменные
+bot = None
+worksheet = None
+track_data = {}
+
+def initialize_bot():
+    global bot, worksheet, track_data
+    
+    # Инициализация бота
+    bot = telebot.TeleBot(TOKEN)
+    
+    # Инициализация Google Sheets
+    if os.path.exists('creds.json'):
         try:
+            creds = ServiceAccountCredentials.from_json_keyfile_name('creds.json', scope)
+            client = gspread.authorize(creds)
             spreadsheet = client.open(SPREADSHEET_NAME)
             worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
             print("Успешно подключено к Google Таблице!")
-        except gspread.SpreadsheetNotFound:
-            print(f"Таблица '{SPREADSHEET_NAME}' не найдена!")
-        except gspread.WorksheetNotFound:
-            print(f"Лист '{WORKSHEET_NAME}' не найден!")
-            
+        except Exception as e:
+            print(f"Ошибка Google Sheets: {e}")
+            worksheet = None
+    else:
+        print("Файл creds.json не найден")
+    
+    # Загрузка треков
+    try:
+        with open('track_list.csv', newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            track_data = {row['track_number']: row['title'] for row in reader}
+        print(f"Загружено {len(track_data)} треков")
     except Exception as e:
-        print(f"Ошибка авторизации: {e}")
+        print(f"Ошибка загрузки треков: {e}")
+        track_data = {}
 
-# === Загрузка CSV-файла с треками ===
-try:
-    with open('track_list.csv', newline='', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        track_data = {row['track_number']: row['title'] for row in reader}
-    print(f"Загружено {len(track_data)} треков")
-except FileNotFoundError:
-    track_data = {}
-    print("Предупреждение: track_list.csv не найден")
-except Exception as e:
-    track_data = {}
-    print(f"Ошибка загрузки track_list.csv: {e}")
-
-# === Бот ===
-bot = telebot.TeleBot(TOKEN)
-
-# === Словари состояния ===
+# Словари состояния
 user_states = {}
 
 def save_to_google_sheets(user_data, ratings):
     """Сохраняет результаты в Google Таблицу"""
+    if not worksheet:
+        print("Google Таблица не доступна")
+        return False
+    
     try:
         # Получаем все данные из таблицы
         all_data = worksheet.get_all_values()
@@ -96,6 +103,9 @@ def save_to_google_sheets(user_data, ratings):
 
 def prepare_spreadsheet():
     """Подготавливает структуру таблицы"""
+    if not worksheet:
+        return
+    
     try:
         # Создаем заголовки если таблица пустая
         if not worksheet.get_all_values():
@@ -106,11 +116,11 @@ def prepare_spreadsheet():
             
             # Заполняем номера и названия треков
             for num, title in track_data.items():
-                row = int(num) + 1  # +1 потому что первая строка - заголовки
+                row = int(num) + 1
                 worksheet.update_cell(row, 1, f"Track {num}")
                 worksheet.update_cell(row, 2, title)
                 
-        print("Таблица подготовлена")
+        print("Таблица подготовена")
         
     except Exception as e:
         print(f"Ошибка подготовки таблицы: {e}")
@@ -219,9 +229,37 @@ def handle_rating(c):
 def handle_all_messages(message):
     bot.send_message(message.chat.id, "Для начала теста нажмите /start")
 
+# === Вебхук обработчики ===
+@app.route('/' + TOKEN, methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return ''
+    return 'Bad Request', 400
+
+@app.route('/')
+def index():
+    return 'Music Test Bot is running!'
+
+@app.route('/set_webhook')
+def set_webhook():
+    if WEBHOOK_URL:
+        bot.remove_webhook()
+        bot.set_webhook(url=WEBHOOK_URL)
+        return f'Webhook set to: {WEBHOOK_URL}'
+    return 'WEBHOOK_URL not set'
+
 if __name__ == "__main__":
-    print("Бот запущен и готов к работе!")
-    try:
+    initialize_bot()
+    
+    # Для локального тестирования используем polling
+    if os.environ.get('RENDER'):
+        print("Running on Render - using webhook")
+        port = int(os.environ.get('PORT', 10000))
+        app.run(host='0.0.0.0', port=port)
+    else:
+        print("Running locally - using polling")
+        bot.remove_webhook()
         bot.polling(none_stop=True)
-    except Exception as e:
-        print(f"Ошибка запуска бота: {e}")
