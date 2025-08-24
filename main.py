@@ -145,7 +145,10 @@ def start(message):
 @bot.callback_query_handler(func=lambda call: call.data == "start_test")
 def start_test(call):
     chat_id = call.message.chat.id
-    bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
+    try:
+        bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
+    except Exception:
+        pass
     ask_gender(chat_id)
 
 def ask_gender(chat_id):
@@ -157,8 +160,17 @@ def ask_gender(chat_id):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("gender_"))
 def handle_gender(c):
     chat_id = c.message.chat.id
+    if chat_id not in user_states:
+        bot.send_message(chat_id, "⚠️ Пожалуйста, начните тест заново командой /start")
+        return
+
     user_states[chat_id]['gender'] = c.data.split('_')[1]
-    bot.delete_message(chat_id, c.message.message_id)
+
+    try:
+        bot.delete_message(chat_id, c.message.message_id)
+    except Exception:
+        pass
+
     ask_age(chat_id)
 
 def ask_age(chat_id):
@@ -171,8 +183,16 @@ def ask_age(chat_id):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("age_"))
 def handle_age(c):
     chat_id = c.message.chat.id
+    if chat_id not in user_states:
+        bot.send_message(chat_id, "⚠️ Пожалуйста, начните тест заново командой /start")
+        return
+
     user_states[chat_id]['age'] = c.data.split('_')[1]
-    bot.delete_message(chat_id, c.message.message_id)
+
+    try:
+        bot.delete_message(chat_id, c.message.message_id)
+    except Exception:
+        pass
 
     bot.send_message(chat_id, "🎵 Начинаем музыкальный тест!\n\nОцените каждый трек по шкале от 1 до 5 звезд")
     send_track(chat_id)
@@ -210,12 +230,19 @@ def send_track(chat_id):
 def handle_rating(c):
     chat_id = c.message.chat.id
     rating = int(c.data.split('_')[1])
-    track_num = user_states[chat_id]['current_track']
+    if chat_id not in user_states:
+        bot.send_message(chat_id, "⚠️ Пожалуйста, начните тест заново командой /start")
+        return
 
+    track_num = user_states[chat_id]['current_track']
     user_states[chat_id]['ratings'][str(track_num)] = rating
     user_states[chat_id]['current_track'] += 1
 
-    bot.delete_message(chat_id, c.message.message_id)
+    try:
+        bot.delete_message(chat_id, c.message.message_id)
+    except Exception:
+        pass
+
     send_track(chat_id)
 
 @bot.message_handler(func=lambda message: True)
