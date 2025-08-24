@@ -1,198 +1,335 @@
 import telebot
-from telebot import types
 import csv
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import os
+from telebot import types
+from datetime import datetime
+from flask import Flask, request
+import json
+import time
 
-# === Настройки ===
-TOKEN = "ТВОЙ_ТОКЕН"
+# === НАСТРОЙКИ ===
+TOKEN = "8109304672:AAHkOQ8kzQLmHupii78YCd-1Q4HtDKWuuNk"
+ADMIN_CHAT_ID = "866964827"
 AUDIO_FOLDER = "audio"
 SPREADSHEET_NAME = "music_testing"
 WORKSHEET_NAME = "track_list"
-PROGRESS_FILE = "progress.csv"
+
+bot = telebot.TeleBot(TOKEN)
+app = Flask(__name__)
 
 # === Google Sheets авторизация ===
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name("creds.json", scope)
-client = gspread.authorize(creds)
-sheet = client.open(SPREADSHEET_NAME).worksheet(WORKSHEET_NAME)
+scope = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive"
+]
 
-# === Подготовка CSV для прогресса ===
-if not os.path.exists(PROGRESS_FILE):
-    with open(PROGRESS_FILE, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["chat_id", "track_number", "score"])
+worksheet = None
 
-# === Загружаем список треков ===
-with open("track_list.csv", newline="", encoding="utf-8") as f:
-    reader = csv.DictReader(f)
-    track_data = {row["track_number"]: row["title"] for row in reader}
+# === ХРАНИЛИЩЕ ДЛЯ УДАЛЕНИЯ СООБЩЕНИЙ ===
+user_last_message = {}
+user_rating_guide = {}
+user_rating_time = {}
+user_states = {}
 
-# === Бот ===
-bot = telebot.TeleBot(TOKEN)
+# === СООБЩЕНИЕ С РАСШИФРОВКОЙ ОЦЕНОК ===
+RATING_GUIDE_MESSAGE = """
+🎵 **Шкала оценок:**
 
-# === Словари состояния ===
-user_progress = {}     # какой трек у кого сейчас
-user_rated_tracks = {} # что уже оценено
-user_metadata = {}     # пол/возраст
-last_audios = {}       # id последнего аудио
+1️⃣ ★ - Совсем не нравится
+2️⃣ ★★ - Скорее не нравится  
+3️⃣ ★★★ - Нейтрально
+4️⃣ ★★★★ - Нравится
+5️⃣ ★★★★★ - Очень нравится
 
-# === Вспомогалки ===
-def save_progress_csv(chat_id, track_number, score):
-    """Сохраняем каждую оценку в CSV"""
-    with open(PROGRESS_FILE, "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow([chat_id, track_number, score])
+Выберите оценку для текущего трека:
+"""
 
-def upload_results_to_google():
-    """После завершения теста переносим CSV в Google Sheets"""
-    with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        data = list(reader)
+# === ИНИЦИАЛИЗАЦИЯ GOOGLE SHEETS ===
+def initialize_google_sheets():
+    global worksheet
+    try:
+        creds_json_str = os.environ.get('GOOGLE_CREDS_JSON')
+        creds_b64 = os.environ.get('GOOGLE_CREDS_B64')
 
-    if not data:
-        return
+        if creds_json_str:
+            creds_dict = json.loads(creds_json_str)
+        elif creds_b64:
+            import base64
+            creds_dict = json.loads(base64.b64decode(creds_b64).decode('utf-8'))
+        elif os.path.exists('creds.json'):
+            with open('creds.json', 'r', encoding='utf-8') as f:
+                creds_dict = json.load(f)
+        else:
+            print("❌ Нет ключа для Google API")
+            return False
 
-    headers = ["chat_id", "track_number", "score"]
-    sheet.clear()
-    sheet.append_row(headers)
-    for row in data:
-        sheet.append_row([row["chat_id"], row["track_number"], row["score"]])
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        spreadsheet = client.open(SPREADSHEET_NAME)
+        worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
+        print("✅ Успешно подключено к Google Таблице!")
+        return True
 
-# === /results команда ===
-@bot.message_handler(commands=["results"])
-def send_results(m):
-    chat_id = m.chat.id
-    if os.path.exists(PROGRESS_FILE):
-        with open(PROGRESS_FILE, "rb") as f:
-            bot.send_document(chat_id, f)
-    else:
-        bot.send_message(chat_id, "Результаты пока пусты.")
+    except Exception as e:
+        print(f"❌ Ошибка Google Sheets: {e}")
+        return False
 
-# === Опрос перед тестом ===
-@bot.message_handler(func=lambda message: message.chat.id not in user_metadata)
-def welcome_handler(message):
+# === СОХРАНЕНИЕ ОТДЕЛЬНО В CSV ===
+def save_to_csv_progress(user_data, track_num, rating):
+    try:
+        file_exists = os.path.exists('backup_results.csv')
+        with open('backup_results.csv', 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                headers = ['user_id','username','first_name','last_name','gender','age','timestamp','track','rating']
+                writer.writerow(headers)
+            row = [
+                user_data['user_id'],
+                user_data.get('username',''),
+                user_data.get('first_name',''),
+                user_data.get('last_name',''),
+                user_data.get('gender',''),
+                user_data.get('age',''),
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                track_num,
+                rating
+            ]
+            writer.writerow(row)
+        print(f"✅ Оценка трека {track_num} сохранена в CSV")
+    except Exception as e:
+        print(f"❌ Ошибка сохранения прогресса в CSV: {e}")
+
+# === СОХРАНЕНИЕ В GOOGLE SHEETS ПОСЛЕ ЗАВЕРШЕНИЯ ===
+def save_to_google_sheets(user_data, ratings):
+    if not worksheet:
+        print("❌ Google Таблица не доступна")
+        return False
+    try:
+        # Подготавливаем данные
+        user_info = [
+            user_data['user_id'],
+            f"@{user_data['username']}" if user_data.get('username') else user_data.get('first_name', ''),
+            user_data.get('last_name', ''),
+            user_data.get('gender',''),
+            user_data.get('age',''),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ]
+        # Добавляем оценки
+        for i in range(1, 31):
+            user_info.append(ratings.get(str(i),''))
+        # Находим следующую свободную колонку
+        all_data = worksheet.get_all_values()
+        next_col = len(all_data[0]) + 1 if all_data else 1
+        # Записываем
+        for row_idx, value in enumerate(user_info, start=1):
+            worksheet.update_cell(row_idx, next_col, value)
+        print(f"✅ Данные сохранены в Google Sheets (колонка {next_col})")
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка записи в Google Sheets: {e}")
+        return False
+
+# === ОТПРАВКА И СОХРАНЕНИЕ СООБЩЕНИЙ ===
+def send_message(chat_id, text, reply_markup=None, parse_mode=None):
+    try:
+        msg = bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
+        if chat_id not in user_last_message:
+            user_last_message[chat_id] = []
+        user_last_message[chat_id].append(msg.message_id)
+        return msg
+    except Exception as e:
+        print(f"Ошибка отправки сообщения: {e}")
+
+def cleanup_chat(chat_id, keep_rating_guide=False):
+    if chat_id in user_last_message:
+        try:
+            rating_guide_id = user_rating_guide.get(chat_id)
+            messages_to_keep = []
+            if keep_rating_guide and rating_guide_id:
+                messages_to_keep.append(rating_guide_id)
+            for msg_id in user_last_message[chat_id]:
+                if msg_id not in messages_to_keep:
+                    try: bot.delete_message(chat_id, msg_id)
+                    except: pass
+            user_last_message[chat_id] = messages_to_keep
+        except Exception as e:
+            print(f"Ошибка очистки чата: {e}")
+
+def send_rating_guide(chat_id):
+    if chat_id in user_rating_guide:
+        try: bot.delete_message(chat_id, user_rating_guide[chat_id])
+        except: pass
+    msg = send_message(chat_id, RATING_GUIDE_MESSAGE, parse_mode='Markdown')
+    if msg: user_rating_guide[chat_id] = msg.message_id
+
+# === КОМАНДА START ===
+@bot.message_handler(commands=['start'])
+def handle_start(message):
     chat_id = message.chat.id
-    remove_kb = types.ReplyKeyboardRemove()
-    bot.send_message(chat_id, "👋 Добро пожаловать в музыкальный тест!", reply_markup=remove_kb)
-
-    welcome_text = (
-        "Ты услышишь несколько коротких треков. "
-        "Оцени каждый по шкале от 1 до 5.\n\n"
-        "Но сначала давай познакомимся 🙂"
-    )
-
+    user = message.from_user
+    cleanup_chat(chat_id, keep_rating_guide=True)
+    user_states[chat_id] = {
+        'user_data': {
+            'user_id': chat_id,
+            'username': user.username,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
+            'gender': '',
+            'age': ''
+        },
+        'ratings': {},
+        'current_track': 1
+    }
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🚀 Начать", callback_data="start_test"))
-    bot.send_message(chat_id, welcome_text, reply_markup=kb)
-    user_metadata[chat_id] = None
+    kb.add(types.InlineKeyboardButton("🚀 Начать тест", callback_data="start_test"))
+    welcome_text = f"Привет, {user.first_name}! 🎵\n\nВы прослушаете 30 треков и оцените каждый.\n🎁 После теста розыгрыш подарков!"
+    send_message(chat_id, welcome_text, reply_markup=kb)
 
-@bot.callback_query_handler(func=lambda call: call.data == "start_test")
+@bot.callback_query_handler(func=lambda call: call.data=="start_test")
 def handle_start_button(call):
     chat_id = call.message.chat.id
-    bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
-
-    user_metadata[chat_id] = {}
-    user_progress[chat_id] = 0
-    user_rated_tracks[chat_id] = set()
+    try: bot.delete_message(chat_id, call.message.message_id)
+    except: pass
+    cleanup_chat(chat_id)
     ask_gender(chat_id)
 
+# === ПОЛ И ВОЗРАСТ ===
 def ask_gender(chat_id):
     kb = types.InlineKeyboardMarkup()
-    kb.add(
-        types.InlineKeyboardButton("Мужской", callback_data="gender_M"),
-        types.InlineKeyboardButton("Женский", callback_data="gender_F"),
-    )
-    bot.send_message(chat_id, "Укажи свой пол:", reply_markup=kb)
+    kb.add(types.InlineKeyboardButton("Мужской", callback_data="gender_Мужской"),
+           types.InlineKeyboardButton("Женский", callback_data="gender_Женский"))
+    send_message(chat_id, "Укажите ваш пол:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("gender_"))
 def handle_gender(c):
     chat_id = c.message.chat.id
-    user_metadata[chat_id] = {"gender": c.data.split("_", 1)[1]}
-    try:
-        bot.delete_message(chat_id, c.message.message_id)
-    except Exception:
-        pass
+    gender = c.data.split("_")[1]
+    user_states[chat_id]['user_data']['gender'] = gender
+    try: bot.delete_message(chat_id, c.message.message_id)
+    except: pass
+    cleanup_chat(chat_id)
     ask_age(chat_id)
 
 def ask_age(chat_id):
-    opts = ["до 24", "25-34", "35-44", "45-54", "55+"]
-    kb = types.InlineKeyboardMarkup(row_width=3)
-    for o in opts:
-        kb.add(types.InlineKeyboardButton(o, callback_data=f"age_{o}"))
-    bot.send_message(chat_id, "Укажи свой возраст:", reply_markup=kb)
+    opts = ["до 24","25-34","35-44","45-54","55+"]
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    buttons = [types.InlineKeyboardButton(o, callback_data=f"age_{o}") for o in opts]
+    kb.add(*buttons)
+    send_message(chat_id, "Укажите ваш возраст:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("age_"))
 def handle_age(c):
     chat_id = c.message.chat.id
-    user_metadata[chat_id]["age"] = c.data.split("_", 1)[1]
-    try:
-        bot.delete_message(chat_id, c.message.message_id)
-    except Exception:
-        pass
+    age = c.data.split("_")[1]
+    user_states[chat_id]['user_data']['age'] = age
+    try: bot.delete_message(chat_id, c.message.message_id)
+    except: pass
+    cleanup_chat(chat_id)
+    send_message(chat_id, f"Спасибо, {user_states[chat_id]['user_data'].get('username','') or user_states[chat_id]['user_data']['first_name']}! Начнем тест.")
+    send_rating_guide(chat_id)
+    send_track(chat_id)
 
-    user_progress[chat_id] = 1
-    bot.send_message(
-        chat_id,
-        "Оцени трек от 1 до 5:\n\n"
-        "1 — Не нравится\n"
-        "2 — Раньше нравилась, но надоела\n"
-        "3 — Нейтрально\n"
-        "4 — Нравится\n"
-        "5 — Любимая песня",
-    )
-    send_next_track(chat_id)
-
-# === Отправка треков ===
-def send_next_track(chat_id):
-    n = user_progress.get(chat_id, 1)
-    path = os.path.join(AUDIO_FOLDER, f"{n:03}.mp3")
-    if not os.path.exists(path):
-        bot.send_message(chat_id, "🎉 Тест завершён! Сохраняю результаты...")
-        upload_results_to_google()
+# === ТРЕКИ ===
+def send_track(chat_id):
+    cleanup_chat(chat_id, keep_rating_guide=True)
+    track_num = user_states[chat_id]['current_track']
+    if track_num>30: 
+        finish_test(chat_id)
         return
-
-    with open(path, "rb") as f:
-        m = bot.send_audio(chat_id, f, caption=f"Трек №{n}")
-        last_audios[chat_id] = m.message_id
-
-    kb = types.InlineKeyboardMarkup(row_width=5)
-    for i in range(1, 6):
-        kb.add(types.InlineKeyboardButton(str(i), callback_data=f"rate_{i}"))
-    bot.send_message(chat_id, "Оцените:", reply_markup=kb)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("rate_"))
-def handle_rate(c):
-    chat_id = c.message.chat.id
-    n = user_progress.get(chat_id, 1)
-
-    if n in user_rated_tracks[chat_id]:
-        bot.answer_callback_query(c.id, "Уже оценено", show_alert=True)
-        return
-
-    score = c.data.split("_", 1)[1]
-    save_progress_csv(chat_id, n, score)
-    user_rated_tracks[chat_id].add(n)
-
-    if chat_id in last_audios:
+    track_filename = f"{track_num:03d}.mp3"
+    track_path = os.path.join(AUDIO_FOLDER, track_filename)
+    send_message(chat_id, f"🎵 Трек {track_num}/30")
+    if os.path.exists(track_path):
         try:
-            bot.delete_message(chat_id, last_audios[chat_id])
-        except Exception:
-            pass
+            with open(track_path,'rb') as f:
+                audio_msg = bot.send_audio(chat_id, f, title=f"Трек {track_num:03d}")
+                user_last_message.setdefault(chat_id, []).append(audio_msg.message_id)
+            kb = types.InlineKeyboardMarkup(row_width=5)
+            kb.add(*[types.InlineKeyboardButton(str(i), callback_data=f"rate_{i}") for i in range(1,6)])
+            rating_msg = bot.send_message(chat_id, "Оцените трек:", reply_markup=kb)
+            user_last_message[chat_id].append(rating_msg.message_id)
+        except Exception as e:
+            send_message(chat_id, f"❌ Ошибка отправки трека: {e}")
+            user_states[chat_id]['current_track']+=1
+            send_track(chat_id)
+    else:
+        send_message(chat_id, f"⚠️ Трек {track_num:03d} не найден.")
+        user_states[chat_id]['current_track']+=1
+        send_track(chat_id)
 
-    try:
-        bot.delete_message(chat_id, c.message.message_id)
-    except Exception:
-        pass
+# === ОБРАБОТКА ОЦЕНКИ ===
+@bot.callback_query_handler(func=lambda c: c.data.startswith("rate_"))
+def handle_rating(c):
+    chat_id = c.message.chat.id
+    rating = int(c.data.split("_")[1])
+    track_num = user_states[chat_id]['current_track']
+    current_time = time.time()
+    last_time = user_rating_time.get(chat_id,0)
+    if current_time - last_time<2:
+        bot.answer_callback_query(c.id,"Пожалуйста, прослушайте трек перед оценкой")
+        return
+    user_rating_time[chat_id] = current_time
+    user_states[chat_id]['ratings'][str(track_num)] = rating
+    save_to_csv_progress(user_states[chat_id]['user_data'], track_num, rating)
+    try: bot.delete_message(chat_id, c.message.message_id)
+    except: pass
+    user_states[chat_id]['current_track']+=1
+    cleanup_chat(chat_id, keep_rating_guide=True)
+    send_track(chat_id)
 
-    user_progress[chat_id] = n + 1
-    send_next_track(chat_id)
+def finish_test(chat_id):
+    user_data = user_states[chat_id]['user_data']
+    ratings = user_states[chat_id]['ratings']
+    google_success = save_to_google_sheets(user_data, ratings)
+    username_display = f"@{user_data.get('username')}" if user_data.get('username') else user_data['first_name']
+    if google_success:
+        send_message(chat_id, f"🎉 {username_display}, тест завершён! Результаты сохранены в Google Таблицу.")
+    else:
+        send_message(chat_id, f"🎉 {username_display}, тест завершён! Результаты сохранены в CSV.")
 
-# === Фолбэк ===
-@bot.message_handler(func=lambda m: True)
-def fallback(m):
-    bot.send_message(m.chat.id, "Нажмите /start")
+# === РЕЗУЛЬТАТЫ /results ===
+@bot.message_handler(commands=['results'])
+def send_results(message):
+    if str(message.chat.id)!=ADMIN_CHAT_ID: return
+    files = ['backup_results.csv']
+    for f in files:
+        if os.path.exists(f):
+            with open(f,'rb') as doc:
+                bot.send_document(ADMIN_CHAT_ID, doc, caption=f"📄 {f}")
 
-# === Старт ===
-bot.polling()
+# === FLASK WEBHOOK ===
+@app.route(f'/webhook/{TOKEN}', methods=['POST'])
+def webhook():
+    if request.headers.get('content-type')=='application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return ''
+    return 'Bad Request',400
+
+@app.route('/')
+def index(): return 'Music Test Bot is running!'
+
+@app.route('/health')
+def health(): return 'OK'
+
+# === ЗАПУСК ===
+if __name__=="__main__":
+    initialize_google_sheets()
+    print("🚀 Бот запущен и готов к работе!")
+    if 'RENDER' in os.environ:
+        port = int(os.environ.get('PORT',10000))
+        try:
+            bot.remove_webhook()
+            time.sleep(1)
+            webhook_url=f"https://musicbot-knqj.onrender.com/webhook/{TOKEN}"
+            bot.set_webhook(url=webhook_url)
+            print(f"✅ Вебхук установлен: {webhook_url}")
+        except Exception as e:
+            print(f"❌ Ошибка установки вебхука: {e}")
+        app.run(host='0.0.0.0', port=port)
+    else:
+        bot.remove_webhook()
+        bot.polling(none_stop=True)
