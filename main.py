@@ -1,13 +1,13 @@
 import os
 import telebot
-import time
 import csv
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 from telebot import types
 from flask import Flask, request
 from datetime import datetime
 import json
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+import time
 
 # === НАСТРОЙКИ ===
 TOKEN = "8109304672:AAHkOQ8kzQLmHupii78YCd-1Q4HtDKWuuNk"
@@ -45,67 +45,10 @@ def initialize_google_sheets():
         client = gspread.authorize(creds)
         spreadsheet = client.open(SPREADSHEET_NAME)
         worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
-        print("✅ Подключено к Google Таблице!")
+        print("✅ Успешно подключено к Google Таблице!")
         return True
     except Exception as e:
         print(f"❌ Ошибка Google Sheets: {e}")
-        return False
-
-def save_to_google_sheets(user_data, ratings):
-    if not worksheet:
-        print("❌ Google Таблица недоступна")
-        return False
-    try:
-        all_data = worksheet.get_all_values()
-        next_col = len(all_data[0]) + 1 if all_data else 1
-
-        user_info = [
-            user_data['user_id'],
-            f"@{user_data['username']}" if user_data.get('username') else user_data.get('first_name',''),
-            user_data.get('last_name',''),
-            user_data['gender'],
-            user_data['age'],
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        ]
-
-        for i in range(1,31):
-            user_info.append(ratings.get(str(i), ''))
-
-        for row_idx, value in enumerate(user_info, start=1):
-            worksheet.update_cell(row_idx, next_col, value)
-
-        print(f"✅ Данные сохранены в колонку {next_col}")
-        return True
-    except Exception as e:
-        print(f"❌ Ошибка записи в Google Таблицу: {e}")
-        return False
-
-def save_to_csv_backup(user_data, ratings):
-    try:
-        file_exists = os.path.exists('backup_results.csv')
-        with open('backup_results.csv','a',newline='',encoding='utf-8') as f:
-            writer = csv.writer(f)
-            if not file_exists:
-                headers = ['user_id','username','first_name','last_name','gender','age','timestamp']
-                for i in range(1,31):
-                    headers.append(f'track_{i}')
-                writer.writerow(headers)
-            row_data = [
-                user_data['user_id'],
-                user_data.get('username',''),
-                user_data.get('first_name',''),
-                user_data.get('last_name',''),
-                user_data['gender'],
-                user_data['age'],
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            ]
-            for i in range(1,31):
-                row_data.append(ratings.get(str(i),''))
-            writer.writerow(row_data)
-        print("✅ Данные сохранены в CSV")
-        return True
-    except Exception as e:
-        print(f"❌ Ошибка CSV: {e}")
         return False
 
 # === ХРАНИЛИЩЕ ===
@@ -127,7 +70,68 @@ RATING_GUIDE_MESSAGE = """
 Выберите оценку для текущего трека:
 """
 
-# === СЛУЖЕБНЫЕ ФУНКЦИИ ===
+# === СОХРАНЕНИЕ В GOOGLE SHEETS ===
+def save_to_google_sheets(user_data, ratings):
+    if not worksheet:
+        print("❌ Google Таблица не доступна")
+        return False
+    try:
+        all_data = worksheet.get_all_values()
+        if not all_data:
+            next_col = 1
+        else:
+            next_col = len(all_data[0]) + 1
+
+        user_info = [
+            user_data['user_id'],
+            f"@{user_data['username']}" if user_data.get('username') else user_data.get('first_name', ''),
+            user_data.get('last_name', ''),
+            user_data['gender'],
+            user_data['age'],
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ]
+        for i in range(1, 31):
+            user_info.append(ratings.get(str(i), ''))
+
+        for row_idx, value in enumerate(user_info, start=1):
+            worksheet.update_cell(row_idx, next_col, value)
+
+        print(f"✅ Данные сохранены в колонку {next_col}")
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка Google Sheets: {e}")
+        return False
+
+# === CSV РЕЗЕРВ ===
+def save_to_csv_backup(user_data, ratings):
+    try:
+        file_exists = os.path.exists('backup_results.csv')
+        with open('backup_results.csv', 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                headers = ['user_id', 'username', 'first_name', 'last_name', 'gender', 'age', 'timestamp']
+                for i in range(1, 31):
+                    headers.append(f'track_{i}')
+                writer.writerow(headers)
+            row_data = [
+                user_data['user_id'],
+                user_data.get('username', ''),
+                user_data.get('first_name', ''),
+                user_data.get('last_name', ''),
+                user_data['gender'],
+                user_data['age'],
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            ]
+            for i in range(1, 31):
+                row_data.append(ratings.get(str(i), ''))
+            writer.writerow(row_data)
+        print("✅ Данные сохранены в CSV файл")
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка сохранения в CSV: {e}")
+        return False
+
+# === ФУНКЦИИ ОТПРАВКИ СООБЩЕНИЙ ===
 def send_message(chat_id, text, reply_markup=None, parse_mode=None):
     try:
         msg = bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
@@ -140,10 +144,12 @@ def cleanup_chat(chat_id, keep_rating_guide=False):
     if chat_id in user_last_message:
         try:
             rating_guide_id = user_rating_guide.get(chat_id)
-            messages_to_keep = [rating_guide_id] if keep_rating_guide and rating_guide_id else []
+            messages_to_keep = []
+            if keep_rating_guide and rating_guide_id:
+                messages_to_keep.append(rating_guide_id)
             for msg_id in user_last_message[chat_id]:
                 if msg_id not in messages_to_keep:
-                    try: bot.delete_message(chat_id,msg_id)
+                    try: bot.delete_message(chat_id, msg_id)
                     except: pass
             user_last_message[chat_id] = messages_to_keep
         except Exception as e:
@@ -156,7 +162,7 @@ def send_rating_guide(chat_id):
     msg = send_message(chat_id, RATING_GUIDE_MESSAGE, parse_mode='Markdown')
     if msg: user_rating_guide[chat_id] = msg.message_id
 
-# === КОМАНДА START ===
+# === СТАРТ ТЕСТА ===
 @bot.message_handler(commands=['start'])
 def handle_start(message):
     chat_id = message.chat.id
@@ -168,11 +174,11 @@ def handle_start(message):
             'username': user.username,
             'first_name': user.first_name,
             'last_name': user.last_name,
-            'gender':'',
-            'age':''
+            'gender': '',
+            'age': ''
         },
-        'ratings':{},
-        'current_track':1
+        'ratings': {},
+        'current_track': 1
     }
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🚀 Начать тест", callback_data="start_test"))
@@ -183,7 +189,7 @@ def handle_start(message):
     )
     send_message(chat_id, welcome_text, reply_markup=kb)
 
-@bot.callback_query_handler(func=lambda call: call.data=="start_test")
+@bot.callback_query_handler(func=lambda c: c.data == 'start_test')
 def handle_start_button(call):
     chat_id = call.message.chat.id
     try: bot.delete_message(chat_id, call.message.message_id)
@@ -197,83 +203,84 @@ def ask_gender(chat_id):
         types.InlineKeyboardButton("Мужской", callback_data="gender_Мужской"),
         types.InlineKeyboardButton("Женский", callback_data="gender_Женский")
     )
-    send_message(chat_id,"Укажите ваш пол:", reply_markup=kb)
+    send_message(chat_id, "Укажите ваш пол:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("gender_"))
 def handle_gender(c):
     chat_id = c.message.chat.id
-    gender = c.data.split("_",1)[1]
+    gender = c.data.split('_', 1)[1]
     user_states[chat_id]['user_data']['gender'] = gender
-    try: bot.delete_message(chat_id,c.message.message_id)
+    try: bot.delete_message(chat_id, c.message.message_id)
     except: pass
     cleanup_chat(chat_id)
     ask_age(chat_id)
 
 def ask_age(chat_id):
-    opts = ["до 24","25-34","35-44","45-54","55+"]
+    opts = ["до 24", "25-34", "35-44", "45-54", "55+"]
     kb = types.InlineKeyboardMarkup(row_width=2)
     buttons = [types.InlineKeyboardButton(o, callback_data=f"age_{o}") for o in opts]
     kb.add(*buttons)
-    send_message(chat_id,"Укажите ваш возраст:", reply_markup=kb)
+    send_message(chat_id, "Укажите ваш возраст:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("age_"))
 def handle_age(c):
     chat_id = c.message.chat.id
-    age = c.data.split("_",1)[1]
+    age = c.data.split('_', 1)[1]
     user_states[chat_id]['user_data']['age'] = age
-    try: bot.delete_message(chat_id,c.message.message_id)
+    try: bot.delete_message(chat_id, c.message.message_id)
     except: pass
     cleanup_chat(chat_id)
     username_display = f"@{user_states[chat_id]['user_data']['username']}" if user_states[chat_id]['user_data']['username'] else user_states[chat_id]['user_data']['first_name']
-    send_message(chat_id,f"Спасибо, {username_display}! 🎶\n\nТеперь начнем слепой тест. Удачи! 🎁")
+    send_message(chat_id, f"Спасибо, {username_display}! 🎶\n\nТеперь начнем слепой тест. 🎁")
     send_rating_guide(chat_id)
     send_track(chat_id)
 
-# === ОТПРАВКА ТРЕКОВ ===
+# === ОТПРАВКА ТРЕКА ===
 def send_track(chat_id):
     cleanup_chat(chat_id, keep_rating_guide=True)
     track_num = user_states[chat_id]['current_track']
-    if track_num>30: finish_test(chat_id); return
+    if track_num > 30:
+        finish_test(chat_id)
+        return
     track_filename = f"{track_num:03d}.mp3"
     track_path = os.path.join(AUDIO_FOLDER, track_filename)
-    send_message(chat_id,f"🎵 Трек {track_num}/30")
+    send_message(chat_id, f"🎵 Трек {track_num}/30")
     if os.path.exists(track_path):
-        try:
-            with open(track_path,'rb') as audio_file:
-                audio_msg = bot.send_audio(chat_id,audio_file,title=f"Трек {track_num:03d}")
-                user_last_message.setdefault(chat_id,[]).append(audio_msg.message_id)
-                kb = types.InlineKeyboardMarkup(row_width=5)
-                buttons = [types.InlineKeyboardButton(str(i), callback_data=f"rate_{i}") for i in range(1,6)]
-                kb.add(*buttons)
-                rating_msg = bot.send_message(chat_id,"Оцените трек:",reply_markup=kb)
-                user_last_message[chat_id].append(rating_msg.message_id)
-        except Exception as e:
-            send_message(chat_id,f"❌ Ошибка: {e}")
-            user_states[chat_id]['current_track']+=1
-            send_track(chat_id)
+        with open(track_path, 'rb') as audio_file:
+            audio_msg = bot.send_audio(chat_id, audio_file, title=f"Трек {track_num:03d}")
+            user_last_message.setdefault(chat_id, []).append(audio_msg.message_id)
+            kb = types.InlineKeyboardMarkup(row_width=5)
+            kb.add(*[types.InlineKeyboardButton(str(i), callback_data=f"rate_{i}") for i in range(1,6)])
+            rating_msg = bot.send_message(chat_id, "Оцените трек:", reply_markup=kb)
+            user_last_message[chat_id].append(rating_msg.message_id)
     else:
-        send_message(chat_id,f"⚠️ Трек {track_num:03d} не найден.")
-        user_states[chat_id]['current_track']+=1
+        send_message(chat_id, f"⚠️ Трек {track_num:03d} не найден.")
+        user_states[chat_id]['current_track'] += 1
         send_track(chat_id)
 
 # === ОБРАБОТКА ОЦЕНКИ ===
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rate_"))
 def handle_rating(c):
     chat_id = c.message.chat.id
-    rating = int(c.data.split("_")[1])
+    rating = int(c.data.split('_')[1])
     track_num = user_states[chat_id]['current_track']
     current_time = time.time()
-    if current_time - user_rating_time.get(chat_id,0) < 2:
-        bot.answer_callback_query(c.id,"Пожалуйста, прослушайте трек")
+    last_rating_time = user_rating_time.get(chat_id, 0)
+    if current_time - last_rating_time < 2:
+        bot.answer_callback_query(c.id, "Пожалуйста, прослушайте трек перед оценкой")
         return
-    user_rating_time[chat_id]=current_time
+    user_rating_time[chat_id] = current_time
     user_states[chat_id]['ratings'][str(track_num)] = rating
-    try: bot.delete_message(chat_id,c.message.message_id)
+    # Сохраняем сразу в Google Sheets и CSV
+    save_to_google_sheets(user_states[chat_id]['user_data'], user_states[chat_id]['ratings'])
+    save_to_csv_backup(user_states[chat_id]['user_data'], user_states[chat_id]['ratings'])
+    try: bot.delete_message(chat_id, c.message.message_id)
     except: pass
-    user_states[chat_id]['current_track']+=1
+    user_states[chat_id]['current_track'] += 1
     cleanup_chat(chat_id, keep_rating_guide=True)
     send_track(chat_id)
 
+# === ЗАВЕРШЕНИЕ ТЕСТА ===
 def finish_test(chat_id):
     user_data = user_states[chat_id]['user_data']
     ratings = user_states[chat_id]['ratings']
@@ -281,37 +288,56 @@ def finish_test(chat_id):
     csv_success = save_to_csv_backup(user_data, ratings)
     username_display = f"@{user_data['username']}" if user_data['username'] else user_data['first_name']
     if google_success:
-        send_message(chat_id,f"🎉 {username_display}, тест завершён! Результаты сохранены в Google Таблицу.\n\nСледите за новостями для розыгрыша подарков! 🎁")
+        send_message(chat_id, f"🎉 {username_display}, тест завершён! Результаты сохранены в Google Таблицу.\nСледите за новостями для розыгрыша подарков! 🎁")
     elif csv_success:
-        send_message(chat_id,f"🎉 {username_display}, тест завершён! Результаты сохранены в CSV.\n\nСледите за новостями для розыгрыша подарков! 🎁")
+        send_message(chat_id, f"🎉 {username_display}, тест завершён! Результаты сохранены.\nСледите за новостями для розыгрыша подарков! 🎁")
     else:
-        send_message(chat_id,"⚠️ Тест завершен! Ошибка при сохранении.")
+        send_message(chat_id, "⚠️ Тест завершен! Но возникла ошибка при сохранении.")
+
+# === ОТПРАВКА CSV АДМИНУ ===
+@bot.message_handler(commands=['results'])
+def send_results(message):
+    if str(message.chat.id) != ADMIN_CHAT_ID:
+        return
+    try:
+        # Отправляем резервный CSV файл
+        with open("backup_results.csv", "rb") as f:
+            bot.send_document(ADMIN_CHAT_ID, f, caption="📊 Резервные результаты пользователей")
+    except Exception as e:
+        bot.send_message(ADMIN_CHAT_ID, f"❌ Ошибка при отправке файла: {e}")
 
 # === FLASK WEBHOOK ===
 @app.route(f'/webhook/{TOKEN}', methods=['POST'])
 def webhook():
-    if request.headers.get('content-type')=='application/json':
-        update = telebot.types.Update.de_json(request.get_data().decode('utf-8'))
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
         bot.process_new_updates([update])
         return ''
-    return 'Bad Request',400
+    return 'Bad Request', 400
 
 @app.route('/')
-def index(): return 'Music Test Bot running!'
+def index():
+    return 'Music Test Bot is running!'
+
 @app.route('/health')
-def health(): return 'OK'
+def health():
+    return 'OK'
 
 # === ЗАПУСК ===
-if __name__=="__main__":
+if __name__ == "__main__":
     initialize_google_sheets()
-    print("🚀 Бот запущен!")
+    print("🚀 Бот запущен и готов к работе!")
     if 'RENDER' in os.environ:
-        port = int(os.environ.get('PORT',10000))
+        port = int(os.environ.get('PORT', 10000))
         try:
             bot.remove_webhook()
             time.sleep(1)
-            bot.set_webhook(url=f"https://musicbot-knqj.onrender.com/webhook/{TOKEN}")
-        except Exception as e: print(f"❌ Вебхук: {e}")
+            webhook_url = f"https://musicbot-knqj.onrender.com/webhook/{TOKEN}"
+            bot.set_webhook(url=webhook_url)
+            print(f"✅ Вебхук установлен: {webhook_url}")
+        except Exception as e:
+            print(f"❌ Ошибка установки вебхука: {e}")
         app.run(host='0.0.0.0', port=port)
     else:
         bot.remove_webhook()
