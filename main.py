@@ -219,7 +219,6 @@ def handle_age(c):
     user_states[chat_id]['user_data']['age'] = age
     try: bot.delete_message(chat_id,c.message.message_id)
     except: pass
-    cleanup_chat(chat_id)
     username_display = f"@{user_states[chat_id]['user_data']['username']}" if user_states[chat_id]['user_data']['username'] else user_states[chat_id]['user_data']['first_name']
     send_message(chat_id,f"Спасибо, {username_display}! 🎶\n\nТеперь начнем тест. Удачи! 🎁")
     send_rating_guide(chat_id)
