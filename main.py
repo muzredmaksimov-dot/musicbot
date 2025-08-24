@@ -26,22 +26,33 @@ scope = [
 ]
 
 worksheet = None
-track_data = {}         # mapping track_number (str) -> title
+track_data = {}         # mapping track_number (str) -> title (from CSV)
 MAX_TRACK = 0           # максимально ожидаемый номер трека (int)
 user_states = {}
 
 # === Функции ===
 def initialize_google_sheets():
-    """Инициализация подключения к Google Таблицам через переменную окружения"""
+    """Инициализация подключения к Google Таблицам.
+    Поддерживает env GOOGLE_CREDS_JSON, GOOGLE_CREDS_B64, или локальный creds.json.
+    """
     global worksheet
     try:
         creds_json_str = os.environ.get('GOOGLE_CREDS_JSON')
-        if not creds_json_str:
-            print("❌ GOOGLE_CREDS_JSON не задан")
+        creds_b64 = os.environ.get('GOOGLE_CREDS_B64')
+
+        if creds_json_str:
+            creds_dict = json.loads(creds_json_str)
+        elif creds_b64:
+            import base64
+            creds_dict = json.loads(base64.b64decode(creds_b64).decode('utf-8'))
+        elif os.path.exists('creds.json'):
+            with open('creds.json', 'r', encoding='utf-8') as f:
+                creds_dict = json.load(f)
+        else:
+            print("❌ Нет ключа для Google API: задайте GOOGLE_CREDS_JSON или GOOGLE_CREDS_B64, или положите creds.json")
             worksheet = None
             return False
 
-        creds_dict = json.loads(creds_json_str)
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         spreadsheet = client.open(SPREADSHEET_NAME)
@@ -62,18 +73,19 @@ def load_track_data():
     try:
         if not os.path.exists('track_list.csv'):
             print("⚠️ track_list.csv не найден — попробую определить треки по папке audio")
-            # Попытаться определить количество файлов в audio
             if os.path.isdir(AUDIO_FOLDER):
                 files = sorted(glob.glob(os.path.join(AUDIO_FOLDER, '*.mp3')))
                 for f in files:
-                    # попытаемся распарсить номер из имени файла вида 001.mp3 или 1.mp3
                     basename = os.path.basename(f)
                     name, _ = os.path.splitext(basename)
-                    try:
-                        num = int(name)
-                        track_data[str(num)] = basename
-                    except Exception:
-                        continue
+                    # пробуем взять номер из имени (первые цифры)
+                    digits = ''.join(ch for ch in name.split()[0] if ch.isdigit())
+                    if digits:
+                        try:
+                            num = int(digits)
+                            track_data[str(num)] = basename
+                        except Exception:
+                            continue
                 MAX_TRACK = max((int(k) for k in track_data.keys()), default=0)
                 print(f"✅ Автодетект: найдено {len(track_data)} файлов в {AUDIO_FOLDER}")
                 return True if track_data else False
@@ -86,13 +98,11 @@ def load_track_data():
                 title = row.get('title', '')
                 if tn:
                     tn_stripped = tn.strip()
-                    # сохраняем ключ как строку
                     track_data[tn_stripped] = title
             if track_data:
                 try:
                     MAX_TRACK = max(int(k) for k in track_data.keys())
                 except Exception:
-                    # если ключи не числа — просто длина
                     MAX_TRACK = len(track_data)
         print(f"✅ Загружено {len(track_data)} треков (MAX_TRACK={MAX_TRACK})")
         return True
@@ -101,6 +111,52 @@ def load_track_data():
         track_data = {}
         MAX_TRACK = 0
         return False
+
+def find_audio_file(track_num):
+    """Попытка найти файл для трека track_num.
+    Возвращает путь к файлу или None.
+    Логика:
+      - exact formats: 001.mp3, 01.mp3, 1.mp3
+      - patterns: '001 - *', '1 - *'
+      - check track_data value if it looks like filename
+      - glob '*{track_num}*.mp3' as last resort
+    """
+    # проверяем разные форматы имени
+    candidates = [
+        os.path.join(AUDIO_FOLDER, f"{track_num:03d}.mp3"),
+        os.path.join(AUDIO_FOLDER, f"{track_num:02d}.mp3"),
+        os.path.join(AUDIO_FOLDER, f"{track_num}.mp3"),
+    ]
+
+    # если в CSV в title явно указано имя файла (редкий случай) — попробуем
+    title = track_data.get(str(track_num))
+    if title:
+        # если title выглядит как файл (оканчивается на .mp3) — попробуем
+        if title.lower().endswith('.mp3'):
+            candidates.append(os.path.join(AUDIO_FOLDER, title))
+        # если title содержит номер и/или название — возможно файл "001 - Title.mp3"
+        candidates.append(os.path.join(AUDIO_FOLDER, f"{track_num:03d} - {title}.mp3"))
+        candidates.append(os.path.join(AUDIO_FOLDER, f"{track_num} - {title}.mp3"))
+
+    # добавляем шаблоны glob для случаев "001 Title.mp3" и т.д.
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+
+    # glob patterns (более общие)
+    patterns = []
+    patterns.append(os.path.join(AUDIO_FOLDER, f"{track_num:03d}*.mp3"))
+    patterns.append(os.path.join(AUDIO_FOLDER, f"{track_num:02d}*.mp3"))
+    patterns.append(os.path.join(AUDIO_FOLDER, f"{track_num}*.mp3"))
+    patterns.append(os.path.join(AUDIO_FOLDER, f"*{track_num}*.mp3"))
+
+    for pat in patterns:
+        found = glob.glob(pat)
+        if found:
+            # возвращаем первый подходящий
+            return found[0]
+
+    return None
 
 def save_to_google_sheets(user_data, ratings):
     """Сохранение результатов в Google Таблицу"""
@@ -174,7 +230,8 @@ def start(message):
         'user_id': chat_id,
         'username': message.from_user.username,
         'ratings': {},
-        'current_track': 1
+        'current_track': 1,
+        'skipped': []  # номера пропущенных из-за отсутствия файлов
     }
 
     kb = types.InlineKeyboardMarkup()
@@ -237,62 +294,55 @@ def handle_age(c):
     send_track(chat_id)
 
 def send_track(chat_id):
-    """Отправляет очередной трек. Корректно обрабатывает отсутствие треков/файлов."""
+    """Отправляет очередной трек. Пропускает отсутствующие файлы, пытаясь найти следующий."""
     if chat_id not in user_states:
         return
 
-    track_num = user_states[chat_id]['current_track']
-
-    # Если не загружены треки (MAX_TRACK == 0) — сообщаем пользователю и не завершаем тест "по-умолчанию"
+    # Защита — если треки не загружены
     if MAX_TRACK == 0:
-        msg = ("⚠️ В настоящий момент треки не загружены на сервере.\n"
-               "Пожалуйста, сообщите администратору или попробуйте позже.")
-        bot.send_message(chat_id, msg)
-        print(f"[DEBUG] Пользователь {chat_id}: попытка начать тест при MAX_TRACK=0")
+        bot.send_message(chat_id, "⚠️ Треки не загружены на сервер. Пожалуйста, попробуйте позже.")
+        print(f"[DEBUG] Пользователь {chat_id}: MAX_TRACK=0")
         return
 
-    # Если номер трека превышает MAX_TRACK — тест окончен
-    if track_num > MAX_TRACK:
+    # начинаем с текущего номера и ищем ближайший доступный файл
+    start = user_states[chat_id]['current_track']
+    track_to_send = None
+    skipped = []
+    for num in range(start, MAX_TRACK + 1):
+        found = find_audio_file(num)
+        if found:
+            track_to_send = (num, found)
+            break
+        else:
+            skipped.append(num)
+
+    if track_to_send is None:
+        # ничего не найдено до конца — завершаем тест и сохраняем
         user_data = user_states[chat_id]
         google_success = save_to_google_sheets(user_data, user_data['ratings'])
         csv_success = save_to_csv_backup(user_data, user_data['ratings'])
-
         if google_success:
             bot.send_message(chat_id, "🎉 Тест завершен! Результаты сохранены в Google Таблицу.")
         elif csv_success:
             bot.send_message(chat_id, "✅ Тест завершен! Результаты сохранены в файл (локальный бэкап).")
         else:
             bot.send_message(chat_id, "⚠️ Тест завершен! Но возникла ошибка при сохранении.")
-        # можно очистить состояние пользователя, если нужно:
         try:
             del user_states[chat_id]
         except Exception:
             pass
         return
 
-    # Формируем путь к аудиофайлу (ожидается формат 001.mp3 / 002.mp3 и т.д.)
-    file_path = os.path.join(AUDIO_FOLDER, f"{track_num:03d}.mp3")
+    # Если были пропуски — сохраним их в состояние и уведомим кратко
+    if skipped:
+        user_states[chat_id].setdefault('skipped', [])
+        user_states[chat_id]['skipped'].extend(skipped)
+        # короткое уведомление пользователю о пропуске первого трека(ов)
+        bot.send_message(chat_id, f"⚠️ Трек(и) {', '.join(str(x) for x in skipped)} недоступен(ы) и будут пропущены.")
 
-    # Если файла нет — логируем и завершаем тест (чтобы не отправлять пустоту пользователю)
-    if not os.path.exists(file_path):
-        # Логируем причину
-        print(f"❌ Отсутствует файл для трека {track_num}: ожидается {file_path}")
-        bot.send_message(chat_id, f"⚠️ Трек #{track_num} временно недоступен. Тест будет завершён, результаты сохраняются.")
-        # сохраняем то, что есть
-        user_data = user_states[chat_id]
-        google_success = save_to_google_sheets(user_data, user_data['ratings'])
-        csv_success = save_to_csv_backup(user_data, user_data['ratings'])
-        if google_success:
-            bot.send_message(chat_id, "🎉 Частично сохранённые результаты отправлены в Google Таблицу.")
-        elif csv_success:
-            bot.send_message(chat_id, "✅ Частично сохранённые результаты сохранены в файл.")
-        else:
-            bot.send_message(chat_id, "⚠️ Ошибка при сохранении результатов.")
-        try:
-            del user_states[chat_id]
-        except Exception:
-            pass
-        return
+    track_num, file_path = track_to_send
+    # обновляем текущий трек на найденный
+    user_states[chat_id]['current_track'] = track_num
 
     # Отправляем сам аудиофайл
     try:
@@ -325,7 +375,8 @@ def handle_rating(c):
     if rating is not None:
         user_states[chat_id]['ratings'][str(track_num)] = rating
 
-    user_states[chat_id]['current_track'] += 1
+    # двигаемся к следующему номеру (на следующем вызове send_track будет найдён следующий доступный файл)
+    user_states[chat_id]['current_track'] = track_num + 1
 
     try:
         bot.delete_message(chat_id, c.message.message_id)
@@ -361,7 +412,6 @@ if __name__ == "__main__":
     print("🚀 Инициализация бота...")
     gs_ok = initialize_google_sheets()
     csv_ok = load_track_data()
-
     print(f"[INIT] GoogleSheets ok={gs_ok}, Tracks loaded ok={csv_ok}, MAX_TRACK={MAX_TRACK}")
 
     if 'RENDER' in os.environ:
