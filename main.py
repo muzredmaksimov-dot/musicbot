@@ -85,7 +85,7 @@ def save_to_csv_backup(user_data, ratings):
         with open('backup_results.csv','a',newline='',encoding='utf-8') as f:
             writer = csv.writer(f)
             if not file_exists:
-                headers = ['user_id','username','first_name','last_name','gender','age','timestamp']
+                headers = ['user_id','username','first_name','last_name','gender','age',]
                 for i in range(1,31):
                     headers.append(f'track_{i}')
                 writer.writerow(headers)
@@ -116,11 +116,11 @@ user_states = {}
 RATING_GUIDE_MESSAGE = """
 🎵 **Шкала оценок:**
 
-1️⃣ ★ - Совсем не нравится
-2️⃣ ★★ - Скорее не нравится  
-3️⃣ ★★★ - Нейтрально
-4️⃣ ★★★★ - Нравится
-5️⃣ ★★★★★ - Очень нравится
+1️⃣  - Не нравится
+2️⃣  - Раньше нравилась, но надоела
+3️⃣  - Нейтрально
+4️⃣  - Нравится
+5️⃣  - Любимая песня
 
 Выберите оценку для текущего трека:
 """
