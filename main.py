@@ -28,9 +28,14 @@ scope = [
 worksheet = None
 track_data = {}         # mapping track_number (str) -> title (from CSV)
 MAX_TRACK = 0           # максимально ожидаемый номер трека (int)
-user_states = {}
 
-# === Функции ===
+# --- состояния (старая логика отправки) ---
+user_progress     = {}   # какой трек у кого сейчас (int)
+user_ratings      = {}   # dict: chat_id -> {track_num_str: rating}
+user_metadata     = {}   # dict: chat_id -> {'username':..., 'gender':..., 'age':...}
+last_audios       = {}   # message_id последнего аудио
+
+# === Функции Google Sheets & CSV (взятые из актуального кода) ===
 def initialize_google_sheets():
     """Инициализация подключения к Google Таблицам.
     Поддерживает env GOOGLE_CREDS_JSON, GOOGLE_CREDS_B64, или локальный creds.json.
@@ -65,101 +70,8 @@ def initialize_google_sheets():
         print(f"❌ Ошибка Google Sheets: {e}")
         return False
 
-def load_track_data():
-    """Загрузка данных о треках из CSV и вычисление MAX_TRACK"""
-    global track_data, MAX_TRACK
-    track_data = {}
-    MAX_TRACK = 0
-    try:
-        if not os.path.exists('track_list.csv'):
-            print("⚠️ track_list.csv не найден — попробую определить треки по папке audio")
-            if os.path.isdir(AUDIO_FOLDER):
-                files = sorted(glob.glob(os.path.join(AUDIO_FOLDER, '*.mp3')))
-                for f in files:
-                    basename = os.path.basename(f)
-                    name, _ = os.path.splitext(basename)
-                    # пробуем взять номер из имени (первые цифры)
-                    digits = ''.join(ch for ch in name.split()[0] if ch.isdigit())
-                    if digits:
-                        try:
-                            num = int(digits)
-                            track_data[str(num)] = basename
-                        except Exception:
-                            continue
-                MAX_TRACK = max((int(k) for k in track_data.keys()), default=0)
-                print(f"✅ Автодетект: найдено {len(track_data)} файлов в {AUDIO_FOLDER}")
-                return True if track_data else False
-            return False
-
-        with open('track_list.csv', newline='', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                tn = row.get('track_number')
-                title = row.get('title', '')
-                if tn:
-                    tn_stripped = tn.strip()
-                    track_data[tn_stripped] = title
-            if track_data:
-                try:
-                    MAX_TRACK = max(int(k) for k in track_data.keys())
-                except Exception:
-                    MAX_TRACK = len(track_data)
-        print(f"✅ Загружено {len(track_data)} треков (MAX_TRACK={MAX_TRACK})")
-        return True
-    except Exception as e:
-        print(f"❌ Ошибка загрузки треков: {e}")
-        track_data = {}
-        MAX_TRACK = 0
-        return False
-
-def find_audio_file(track_num):
-    """Попытка найти файл для трека track_num.
-    Возвращает путь к файлу или None.
-    Логика:
-      - exact formats: 001.mp3, 01.mp3, 1.mp3
-      - patterns: '001 - *', '1 - *'
-      - check track_data value if it looks like filename
-      - glob '*{track_num}*.mp3' as last resort
-    """
-    # проверяем разные форматы имени
-    candidates = [
-        os.path.join(AUDIO_FOLDER, f"{track_num:03d}.mp3"),
-        os.path.join(AUDIO_FOLDER, f"{track_num:02d}.mp3"),
-        os.path.join(AUDIO_FOLDER, f"{track_num}.mp3"),
-    ]
-
-    # если в CSV в title явно указано имя файла (редкий случай) — попробуем
-    title = track_data.get(str(track_num))
-    if title:
-        # если title выглядит как файл (оканчивается на .mp3) — попробуем
-        if title.lower().endswith('.mp3'):
-            candidates.append(os.path.join(AUDIO_FOLDER, title))
-        # если title содержит номер и/или название — возможно файл "001 - Title.mp3"
-        candidates.append(os.path.join(AUDIO_FOLDER, f"{track_num:03d} - {title}.mp3"))
-        candidates.append(os.path.join(AUDIO_FOLDER, f"{track_num} - {title}.mp3"))
-
-    # добавляем шаблоны glob для случаев "001 Title.mp3" и т.д.
-    for c in candidates:
-        if os.path.exists(c):
-            return c
-
-    # glob patterns (более общие)
-    patterns = []
-    patterns.append(os.path.join(AUDIO_FOLDER, f"{track_num:03d}*.mp3"))
-    patterns.append(os.path.join(AUDIO_FOLDER, f"{track_num:02d}*.mp3"))
-    patterns.append(os.path.join(AUDIO_FOLDER, f"{track_num}*.mp3"))
-    patterns.append(os.path.join(AUDIO_FOLDER, f"*{track_num}*.mp3"))
-
-    for pat in patterns:
-        found = glob.glob(pat)
-        if found:
-            # возвращаем первый подходящий
-            return found[0]
-
-    return None
-
 def save_to_google_sheets(user_data, ratings):
-    """Сохранение результатов в Google Таблицу"""
+    """Сохранение результатов в Google Таблицу (как в актуальном коде)."""
     if not worksheet:
         print("❌ Google Таблица не доступна — пропускаем запись в Google")
         return False
@@ -190,7 +102,7 @@ def save_to_google_sheets(user_data, ratings):
         return False
 
 def save_to_csv_backup(user_data, ratings):
-    """Резервное сохранение в CSV"""
+    """Резервное сохранение в CSV (как в актуальном коде)."""
     try:
         file_exists = os.path.exists('backup_results.csv')
         with open('backup_results.csv', 'a', newline='', encoding='utf-8') as f:
@@ -222,172 +134,226 @@ def save_to_csv_backup(user_data, ratings):
         print(f"❌ Ошибка сохранения в CSV: {e}")
         return False
 
-# === Обработчики бота ===
-@bot.message_handler(commands=['start'])
-def start(message):
+# === Утилиты треков ===
+def list_audio_files():
+    if not os.path.isdir(AUDIO_FOLDER):
+        print(f"⚠️ Папка audio не найдена: {AUDIO_FOLDER}")
+        return []
+    files = glob.glob(os.path.join(AUDIO_FOLDER, '**', '*.mp3'), recursive=True)
+    files_sorted = sorted(files)
+    print(f"🔎 Найдено {len(files_sorted)} mp3 в '{AUDIO_FOLDER}':")
+    for p in files_sorted:
+        print("   ", os.path.relpath(p))
+    return files_sorted
+
+def load_track_data():
+    """Загрузим CSV метаданные (если есть) и вычислим MAX_TRACK по файлам/CSV."""
+    global track_data, MAX_TRACK
+    track_data = {}
+    MAX_TRACK = 0
+    try:
+        # листаем файлы для диагностики
+        list_audio_files()
+
+        if os.path.exists('track_list.csv'):
+            with open('track_list.csv', newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    tn = row.get('track_number')
+                    title = row.get('title', '')
+                    if tn:
+                        tn_stripped = tn.strip()
+                        track_data[tn_stripped] = title
+            if track_data:
+                try:
+                    MAX_TRACK = max(int(k) for k in track_data.keys())
+                except Exception:
+                    MAX_TRACK = len(track_data)
+
+        else:
+            # если CSV нет — попробуем определить MAX_TRACK по файлам в папке audio
+            files = list_audio_files()
+            for f in files:
+                bn = os.path.basename(f)
+                name, _ = os.path.splitext(bn)
+                # ищем первые цифры в имени
+                digits = ''.join(ch for ch in name.split()[0] if ch.isdigit())
+                if digits:
+                    try:
+                        num = int(digits)
+                        track_data[str(num)] = bn
+                    except Exception:
+                        continue
+            if track_data:
+                MAX_TRACK = max(int(k) for k in track_data.keys())
+
+        print(f"✅ Загружено {len(track_data)} треков (MAX_TRACK={MAX_TRACK})")
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка загрузки треков: {e}")
+        track_data = {}
+        MAX_TRACK = 0
+        return False
+
+# === Интерфейс / flow — взято из старого кода (отправка треков) ===
+@bot.message_handler(func=lambda message: message.chat.id not in user_metadata)
+def welcome_handler(message):
     chat_id = message.chat.id
-    user_states[chat_id] = {
-        'user_id': chat_id,
-        'username': message.from_user.username,
-        'ratings': {},
-        'current_track': 1,
-        'skipped': []  # номера пропущенных из-за отсутствия файлов
-    }
+    user_metadata[chat_id] = {'username': message.from_user.username}
+    remove_kb = types.ReplyKeyboardRemove()
+    bot.send_message(chat_id, "👋 Добро пожаловать в музыкальный тест!", reply_markup=remove_kb)
+
+    welcome_text = (
+        "Ты услышишь несколько коротких треков. Оцени каждый по шкале от 1 до 5:\n\n"
+        "Но сначала давай познакомимся 🙂"
+    )
 
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🎵 Начать тест", callback_data="start_test"))
-    bot.send_message(chat_id, "Добро пожаловать в музыкальный тест! Нажмите кнопку ниже чтобы начать.", reply_markup=kb)
+    kb.add(types.InlineKeyboardButton("🚀 Начать", callback_data="start_test"))
+    bot.send_message(chat_id, welcome_text, reply_markup=kb)
 
-@bot.callback_query_handler(func=lambda call: call.data == "start_test")
-def start_test(call):
+@bot.callback_query_handler(func=lambda call: call.data == 'start_test')
+def handle_start_button(call):
     chat_id = call.message.chat.id
     try:
         bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
     except Exception:
         pass
+
+    # инициализируем состояния
+    user_metadata[chat_id].setdefault('gender', None)
+    user_metadata[chat_id].setdefault('age', None)
+    user_progress[chat_id] = 1
+    user_ratings[chat_id] = {}
+    last_audios[chat_id] = None
+
     ask_gender(chat_id)
 
 def ask_gender(chat_id):
     kb = types.InlineKeyboardMarkup()
-    kb.row(types.InlineKeyboardButton("Мужской", callback_data="gender_M"))
-    kb.row(types.InlineKeyboardButton("Женский", callback_data="gender_F"))
-    bot.send_message(chat_id, "Укажите ваш пол:", reply_markup=kb)
+    kb.add(
+        types.InlineKeyboardButton("Мужской", callback_data="gender_M"),
+        types.InlineKeyboardButton("Женский", callback_data="gender_F")
+    )
+    bot.send_message(chat_id, "Укажи свой пол:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("gender_"))
 def handle_gender(c):
     chat_id = c.message.chat.id
-    if chat_id not in user_states:
-        bot.send_message(chat_id, "⚠️ Пожалуйста, начните тест заново командой /start")
-        return
-
-    user_states[chat_id]['gender'] = c.data.split('_', 1)[1]
-
+    user_metadata[chat_id]['gender'] = c.data.split('_',1)[1]
     try:
         bot.delete_message(chat_id, c.message.message_id)
     except Exception:
         pass
-
     ask_age(chat_id)
 
 def ask_age(chat_id):
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    ages = ["до 24", "25-34", "35-44", "45-54", "55+"]
-    for age in ages:
-        kb.add(types.InlineKeyboardButton(age, callback_data=f"age_{age}"))
-    bot.send_message(chat_id, "Укажите ваш возраст:", reply_markup=kb)
+    opts = ["до 24","25-34","35-44","45-54","55+"]
+    kb = types.InlineKeyboardMarkup(row_width=3)
+    for o in opts:
+        kb.add(types.InlineKeyboardButton(o, callback_data=f"age_{o}"))
+    bot.send_message(chat_id, "Укажи свой возраст:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("age_"))
 def handle_age(c):
     chat_id = c.message.chat.id
-    if chat_id not in user_states:
-        bot.send_message(chat_id, "⚠️ Пожалуйста, начните тест заново командой /start")
-        return
-
-    user_states[chat_id]['age'] = c.data.split('_', 1)[1]
-
+    user_metadata[chat_id]['age'] = c.data.split('_',1)[1]
     try:
         bot.delete_message(chat_id, c.message.message_id)
     except Exception:
         pass
 
-    bot.send_message(chat_id, "🎵 Начинаем музыкальный тест!\n\nОцените каждый трек по шкале от 1 до 5 звезд")
-    send_track(chat_id)
+    # старт теста (сообщение и отправка первого трека)
+    bot.send_message(chat_id, "Оцени трек от 1 до 5:\n\n1 — Не нравится\n2 — Раньше нравилась, но надоела\n3 — Нейтрально\n4 — Нравится\n5 — Любимая ппесня")
+    send_next_track(chat_id)
 
-def send_track(chat_id):
-    """Отправляет очередной трек. Пропускает отсутствующие файлы, пытаясь найти следующий."""
-    if chat_id not in user_states:
-        return
-
-    # Защита — если треки не загружены
-    if MAX_TRACK == 0:
-        bot.send_message(chat_id, "⚠️ Треки не загружены на сервер. Пожалуйста, попробуйте позже.")
-        print(f"[DEBUG] Пользователь {chat_id}: MAX_TRACK=0")
-        return
-
-    # начинаем с текущего номера и ищем ближайший доступный файл
-    start = user_states[chat_id]['current_track']
-    track_to_send = None
-    skipped = []
-    for num in range(start, MAX_TRACK + 1):
-        found = find_audio_file(num)
-        if found:
-            track_to_send = (num, found)
-            break
-        else:
-            skipped.append(num)
-
-    if track_to_send is None:
-        # ничего не найдено до конца — завершаем тест и сохраняем
-        user_data = user_states[chat_id]
-        google_success = save_to_google_sheets(user_data, user_data['ratings'])
-        csv_success = save_to_csv_backup(user_data, user_data['ratings'])
+def send_next_track(chat_id):
+    """Отправка аудио в формате старого рабочего кода (001.mp3, 002.mp3...)."""
+    n = user_progress.get(chat_id, 1)
+    path = os.path.join(AUDIO_FOLDER, f"{n:03d}.mp3")
+    print(f"[send_next_track] chat={chat_id} пытаемся отправить {path}")
+    if not os.path.exists(path):
+        # нет следующего файла -> считаем тест завершённым
+        bot.send_message(chat_id, "🎉 Тест завершен! Сохраняю результаты...")
+        # готовим данные и сохраняем через актуальные функции
+        user_data = {
+            'user_id': chat_id,
+            'username': user_metadata.get(chat_id, {}).get('username', ''),
+            'gender': user_metadata.get(chat_id, {}).get('gender', ''),
+            'age': user_metadata.get(chat_id, {}).get('age', '')
+        }
+        ratings = user_ratings.get(chat_id, {})
+        google_success = save_to_google_sheets(user_data, ratings)
+        csv_success = save_to_csv_backup(user_data, ratings)
         if google_success:
-            bot.send_message(chat_id, "🎉 Тест завершен! Результаты сохранены в Google Таблицу.")
+            bot.send_message(chat_id, "✅ Результаты сохранены в Google Таблицу.")
         elif csv_success:
-            bot.send_message(chat_id, "✅ Тест завершен! Результаты сохранены в файл (локальный бэкап).")
+            bot.send_message(chat_id, "✅ Результаты сохранены в локальный файл.")
         else:
-            bot.send_message(chat_id, "⚠️ Тест завершен! Но возникла ошибка при сохранении.")
+            bot.send_message(chat_id, "⚠️ Ошибка при сохранении результатов.")
+        # очистка состояний
         try:
-            del user_states[chat_id]
+            del user_progress[chat_id]
+            del user_ratings[chat_id]
+            del user_metadata[chat_id]
+            del last_audios[chat_id]
         except Exception:
             pass
         return
 
-    # Если были пропуски — сохраним их в состояние и уведомим кратко
-    if skipped:
-        user_states[chat_id].setdefault('skipped', [])
-        user_states[chat_id]['skipped'].extend(skipped)
-        # короткое уведомление пользователю о пропуске первого трека(ов)
-        bot.send_message(chat_id, f"⚠️ Трек(и) {', '.join(str(x) for x in skipped)} недоступен(ы) и будут пропущены.")
-
-    track_num, file_path = track_to_send
-    # обновляем текущий трек на найденный
-    user_states[chat_id]['current_track'] = track_num
-
-    # Отправляем сам аудиофайл
+    # отправляем аудио
     try:
-        with open(file_path, 'rb') as audio_file:
-            bot.send_audio(chat_id, audio_file, caption=f"Трек #{track_num}")
+        with open(path, 'rb') as f:
+            m = bot.send_audio(chat_id, f, caption=f"Трек №{n}")
+            last_audios[chat_id] = m.message_id
     except Exception as e:
-        bot.send_message(chat_id, f"Ошибка загрузки трека: {e}")
-        print(f"❌ Ошибка при отправке файла {file_path} пользователю {chat_id}: {e}")
+        print(f"[send_next_track] Ошибка отправки {path}: {e}")
+        bot.send_message(chat_id, f"Ошибка при отправке трека #{n}: {e}")
         return
 
-    # Отправляем inline клавиатуру с оценкой
+    # клавиатура 1..5
     kb = types.InlineKeyboardMarkup(row_width=5)
-    for i in range(1, 6):
-        kb.add(types.InlineKeyboardButton(f"{i}★", callback_data=f"rate_{i}"))
-    bot.send_message(chat_id, "Оцените трек:", reply_markup=kb)
+    for i in range(1,6):
+        kb.add(types.InlineKeyboardButton(str(i), callback_data=f"rate_{i}"))
+    bot.send_message(chat_id, "Оцените:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rate_"))
-def handle_rating(c):
+def handle_rate(c):
     chat_id = c.message.chat.id
-    if chat_id not in user_states:
-        bot.send_message(chat_id, "⚠️ Пожалуйста, начните тест заново командой /start")
+    # защита
+    if chat_id not in user_progress:
+        bot.answer_callback_query(c.id, "Тест не запущен. Нажмите /start или Начать.", show_alert=True)
         return
 
+    n = user_progress.get(chat_id, 1)
+    # если оценка уже есть — предупреждаем
+    if str(n) in user_ratings.get(chat_id, {}):
+        bot.answer_callback_query(c.id, "Уже оценено", show_alert=True)
+        return
+
+    score = c.data.split('_',1)[1]
+
+    # сохраняем оценку в память
+    user_ratings.setdefault(chat_id, {})[str(n)] = score
+
+    # удаляем сообщения с аудио/кнопками (попытки, в try)
     try:
-        rating = int(c.data.split('_', 1)[1])
+        if last_audios.get(chat_id):
+            bot.delete_message(chat_id, last_audios[chat_id])
     except Exception:
-        rating = None
-
-    track_num = user_states[chat_id]['current_track']
-    if rating is not None:
-        user_states[chat_id]['ratings'][str(track_num)] = rating
-
-    # двигаемся к следующему номеру (на следующем вызове send_track будет найдён следующий доступный файл)
-    user_states[chat_id]['current_track'] = track_num + 1
-
+        pass
     try:
         bot.delete_message(chat_id, c.message.message_id)
     except Exception:
         pass
 
-    send_track(chat_id)
+    # идем дальше
+    user_progress[chat_id] = n + 1
+    send_next_track(chat_id)
 
-@bot.message_handler(func=lambda message: True)
-def handle_all_messages(message):
-    bot.send_message(message.chat.id, "Для начала теста нажмите /start")
+@bot.message_handler(func=lambda m: True)
+def fallback(m):
+    bot.send_message(m.chat.id,"Нажмите /start или отправьте любое сообщение, чтобы начать")
 
 # === Вебхук обработчики ===
 @app.route('/webhook/' + TOKEN, methods=['POST'])
