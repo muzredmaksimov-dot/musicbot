@@ -417,18 +417,22 @@ def finish_test(chat_id):
         send_message(chat_id, "⚠️ Тест завершен! Но возникла ошибка при сохранении.")
 
 # === FLASK WEBHOOK ===
-@app.route(f"/{TOKEN}", methods=["POST"])
+@app.route(f'/webhook/{TOKEN}', methods=['POST'])
 def webhook():
     if request.headers.get('content-type') == 'application/json':
-        json_str = request.get_data().decode('UTF-8')
-        update = telebot.types.Update.de_json(json_str)
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
         bot.process_new_updates([update])
-        return "ok", 200
-    return "Bad Request", 400
+        return ''
+    return 'Bad Request', 400
 
-@app.route("/", methods=["GET"])
+@app.route('/')
 def index():
-    return "Музыкальный тест бот работает! 🎵", 200
+    return 'Music Test Bot is running!'
+
+@app.route('/health')
+def health():
+    return 'OK'
 
 # === ЗАПУСК ===
 if __name__ == "__main__":
@@ -441,6 +445,17 @@ if __name__ == "__main__":
     if 'RENDER' in os.environ:
         print("🌐 Запуск на Render (вебхук)")
         port = int(os.environ.get('PORT', 10000))
+        
+        # Устанавливаем вебхук
+        try:
+            bot.remove_webhook()
+            time.sleep(1)
+            webhook_url = f"https://musicbot-knqj.onrender.com/webhook/{TOKEN}"
+            bot.set_webhook(url=webhook_url)
+            print(f"✅ Вебхук установлен: {webhook_url}")
+        except Exception as e:
+            print(f"❌ Ошибка установки вебхука: {e}")
+        
         app.run(host='0.0.0.0', port=port)
     else:
         print("💻 Локальный запуск (polling)")
