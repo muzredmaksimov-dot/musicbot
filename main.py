@@ -1,515 +1,244 @@
-import os
 import telebot
-import sqlite3
-import time
 import csv
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import os
 from telebot import types
-from flask import Flask, request
-from datetime import datetime
 
-# === НАСТРОЙКИ ===
-TOKEN = "8109304672:AAHkOQ8kzQLmHupii78YCd-1Q4HtDKWuuNk"
-ADMIN_CHAT_ID = "866964827"
+# === Настройки ===
+TOKEN = '8109304672:AAHkOQ8kzQLmHupii78YCd-1Q4HtDKWuuNk'
+AUDIO_FOLDER = 'audio'
+SPREADSHEET_NAME = 'music_testing'
+WORKSHEET_NAME = 'track_list'
+
+# === Google Sheets авторизация ===
+scope = ["https://spreadsheets.google.com/feeds", 
+         "https://www.googleapis.com/auth/drive",
+         "https://www.googleapis.com/auth/spreadsheets"]
+creds = ServiceAccountCredentials.from_json_keyfile_name("creds.json", scope)
+client = gspread.authorize(creds)
+sheet = client.open(SPREADSHEET_NAME).worksheet(WORKSHEET_NAME)
+
+# === Загрузка CSV-файла с треками ===
+with open('track_list.csv', newline='', encoding='utf-8') as f:
+    reader = csv.DictReader(f)
+    track_data = {row['track_number']: row['title'] for row in reader}
+
+# === Бот ===
 bot = telebot.TeleBot(TOKEN)
-app = Flask(__name__)
 
-# === БАЗА ДАННЫХ ===
-def init_db():
-    conn = sqlite3.connect('database.db')
-    c = conn.cursor()
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (chat_id INTEGER PRIMARY KEY, 
-                  username TEXT, 
-                  first_name TEXT, 
-                  last_name TEXT, 
-                  gender TEXT, 
-                  age TEXT, 
-                  registration_date TEXT,
-                  completed INTEGER DEFAULT 0)''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS ratings
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  chat_id INTEGER,
-                  track_number INTEGER,
-                  rating INTEGER,
-                  timestamp TEXT,
-                  FOREIGN KEY(chat_id) REFERENCES users(chat_id))''')
-    
-    conn.commit()
-    conn.close()
-    print("✅ База данных инициализирована")
+# === Словари состояния ===
+user_progress = {}        # какой трек у кого сейчас
+user_rated_tracks = {}    # что уже оценено
+user_metadata = {}        # пол/возраст
+user_column = {}          # столбец для каждого пользователя
+last_audios = {}          # message_id последнего аудио
 
-def save_user(chat_id, username, first_name, last_name, gender, age):
-    conn = sqlite3.connect('database.db')
-    c = conn.cursor()
+# === Вспомогательные функции ===
+def prepare_spreadsheet():
+    """Подготавливает структуру таблицы если она пустая"""
+    # Добавляем заголовки если их нет
+    headers = sheet.row_values(1)
+    if not headers:
+        sheet.update('A1', ['Track Number', 'Track Title'])
     
-    c.execute("SELECT * FROM users WHERE chat_id = ?", (chat_id,))
-    if c.fetchone() is None:
-        c.execute("INSERT INTO users (chat_id, username, first_name, last_name, gender, age, registration_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                  (chat_id, username, first_name, last_name, gender, age, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    else:
-        c.execute("UPDATE users SET username=?, first_name=?, last_name=?, gender=?, age=? WHERE chat_id=?",
-                  (username, first_name, last_name, gender, age, chat_id))
-    
-    conn.commit()
-    conn.close()
+    # Заполняем номера и названия треков если их нет
+    all_values = sheet.get_all_values()
+    if len(all_values) < 3:  # Если только заголовки или пусто
+        for num, title in track_data.items():
+            row = int(num) + 2  # +2 потому что первая строка - заголовки, вторая - демография
+            sheet.update_cell(row, 1, num)
+            sheet.update_cell(row, 2, title)
 
-def save_rating(chat_id, track_number, rating):
-    conn = sqlite3.connect('database.db')
-    c = conn.cursor()
-    
-    c.execute("SELECT * FROM ratings WHERE chat_id = ? AND track_number = ?", (chat_id, track_number))
-    if c.fetchone() is None:
-        c.execute("INSERT INTO ratings (chat_id, track_number, rating, timestamp) VALUES (?, ?, ?, ?)",
-                  (chat_id, track_number, rating, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-        
-        c.execute("SELECT COUNT(*) FROM ratings WHERE chat_id = ?", (chat_id,))
-        rated_count = c.fetchone()[0]
-        
-        if rated_count >= 30:
-            c.execute("UPDATE users SET completed = 1 WHERE chat_id = ?", (chat_id,))
-            try:
-                c.execute("SELECT username, first_name FROM users WHERE chat_id = ?", (chat_id,))
-                user_info = c.fetchone()
-                username = user_info[0] or user_info[1] or "Неизвестный"
-            except:
-                pass
-    
-    conn.commit()
-    conn.close()
+def get_next_available_column():
+    """Находит следующий свободный столбец"""
+    headers = sheet.row_values(1)
+    return len(headers) + 1 if headers else 3
 
-def get_user_progress(chat_id):
-    conn = sqlite3.connect('database.db')
-    c = conn.cursor()
+def setup_user_column(chat_id, username):
+    """Настраивает столбец для пользователя"""
+    col = get_next_available_column()
+    user_column[chat_id] = col
     
-    c.execute("SELECT COUNT(*) FROM ratings WHERE chat_id = ?", (chat_id,))
-    progress = c.fetchone()[0]
+    # Записываем заголовок столбца (username или user_id)
+    header_text = f"@{username}" if username else f"user_{chat_id}"
+    sheet.update_cell(1, col, header_text)
     
-    conn.close()
-    return progress
-
-def has_user_completed(chat_id):
-    conn = sqlite3.connect('database.db')
-    c = conn.cursor()
+    # Записываем демографические данные
+    sheet.update_cell(2, col, f"{user_metadata[chat_id]['gender']}, {user_metadata[chat_id]['age']}")
     
-    c.execute("SELECT completed FROM users WHERE chat_id = ?", (chat_id,))
-    result = c.fetchone()
-    
-    conn.close()
-    return result and result[0] == 1
+    return col
 
-# === ЭКСПОРТ В CSV ===
-def export_to_csv():
-    conn = sqlite3.connect('database.db')
-    
-    # Экспорт пользователей
-    with open('users_export.csv', 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(['User ID', 'Username', 'First Name', 'Last Name', 'Gender', 'Age', 'Registration Date', 'Completed'])
-        
-        c = conn.cursor()
-        c.execute("SELECT * FROM users")
-        for row in c.fetchall():
-            writer.writerow(row)
-    
-    # Экспорт оценок
-    with open('ratings_export.csv', 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(['ID', 'User ID', 'Track Number', 'Rating', 'Timestamp'])
-        
-        c = conn.cursor()
-        c.execute("SELECT * FROM ratings")
-        for row in c.fetchall():
-            writer.writerow(row)
-    
-    # Создаем объединенный файл для удобства
-    with open('combined_results.csv', 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(['User ID', 'Username', 'Gender', 'Age', 'Track Number', 'Rating', 'Timestamp'])
-        
-        c = conn.cursor()
-        c.execute('''SELECT u.chat_id, u.username, u.gender, u.age, r.track_number, r.rating, r.timestamp 
-                     FROM users u JOIN ratings r ON u.chat_id = r.chat_id 
-                     ORDER BY u.chat_id, r.track_number''')
-        for row in c.fetchall():
-            writer.writerow(row)
-    
-    conn.close()
-    return True
-
-# === СПИСОК ТРЕКОВ ===
-track_numbers = [f"{str(i).zfill(3)}" for i in range(1, 31)]
-
-# === ХРАНИЛИЩЕ ДЛЯ УДАЛЕНИЯ СООБЩЕНИЙ ===
-user_last_message = {}
-user_rating_guide = {}  # Храним ID сообщения с расшифровкой оценок для каждого пользователя
-
-# === СООБЩЕНИЕ С РАСШИФРОВКОЙ ОЦЕНОК ===
-RATING_GUIDE_MESSAGE = """
-
-1️⃣  - Не нравится
-2️⃣  - Раньше нравилась, но надоела
-3️⃣  - Нейтрально
-4️⃣  - Нравится
-5️⃣  - Любимая песня
-
-Выберите оценку для текущего трека:
-"""
-
-# === ОБРАБОТКА КОМАНД ===
+# === Опрос перед тестом ===
 @bot.message_handler(commands=['start'])
-def handle_start(message):
+def start(message):
     chat_id = message.chat.id
-    user = message.from_user
-    
-    # Удаляем предыдущие сообщения (кроме расшифровки)
-    cleanup_chat(chat_id, keep_rating_guide=True)
-    
-    save_user(chat_id, user.username, user.first_name, user.last_name, "", "")
-    
-    if has_user_completed(chat_id):
-        send_message(chat_id, "🎉 Вы уже завершили тест! Спасибо за участие.")
-        return
-    
-    progress = get_user_progress(chat_id)
-    
-    if progress > 0:
-        send_message(chat_id, f"Продолжим тест! 🎵 (Прогресс: {progress}/30)")
-        send_track(chat_id, progress)
-    else:
-        remove_kb = types.ReplyKeyboardRemove()
-        send_message(chat_id, "👋 Добро пожаловать в музыкальный тест!", reply_markup=remove_kb)
+    welcome_handler(message)
 
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("🚀 Начать тест", callback_data="start_test"))
-        
-        welcome_text = (
-            f"Привет, {user.first_name}! 🎵\n\n"
-            "Вы прослушаете 30 музыкальных треков и оцените каждый по шкале от 1 до 5.\n\n"
-            "🎁 После теста среди всех участников будет розыгрыш подарков!"
-        )
-        
-        send_message(chat_id, welcome_text, reply_markup=kb)
+@bot.message_handler(func=lambda message: message.chat.id not in user_metadata)
+def welcome_handler(message):
+    chat_id = message.chat.id
 
-# === ФУНКЦИЯ ДЛЯ ОТПРАВКИ И СОХРАНЕНИЯ СООБЩЕНИЙ ===
-def send_message(chat_id, text, reply_markup=None, parse_mode=None):
-    try:
-        msg = bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
-        # Сохраняем ID последнего сообщения
-        if chat_id not in user_last_message:
-            user_last_message[chat_id] = []
-        user_last_message[chat_id].append(msg.message_id)
-        return msg
-    except Exception as e:
-        print(f"Ошибка отправки сообщения: {e}")
+    # Убираем клавиатуру, если была
+    remove_kb = types.ReplyKeyboardRemove()
+    bot.send_message(chat_id, "👋 Добро пожаловать в музыкальный тест!", reply_markup=remove_kb)
 
-# === ОЧИСТКА ЧАТА (С СОХРАНЕНИЕМ РАСШИФРОВКИ) ===
-def cleanup_chat(chat_id, keep_rating_guide=False):
-    if chat_id in user_last_message:
-        try:
-            # Сохраняем ID сообщения с расшифровкой оценок
-            rating_guide_id = user_rating_guide.get(chat_id)
-            
-            messages_to_keep = []
-            if keep_rating_guide and rating_guide_id:
-                messages_to_keep.append(rating_guide_id)
-            
-            # Удаляем все сообщения кроме тех, что нужно сохранить
-            for msg_id in user_last_message[chat_id]:
-                if msg_id not in messages_to_keep:
-                    try:
-                        bot.delete_message(chat_id, msg_id)
-                    except:
-                        pass
-            
-            # Обновляем список сообщений, оставляя только те, что сохранили
-            user_last_message[chat_id] = messages_to_keep
-            
-        except Exception as e:
-            print(f"Ошибка очистки чата: {e}")
+    # Сообщение с описанием и кнопкой
+    welcome_text = (
+        "Ты услышишь несколько коротких треков. Оцени каждый по шкале от 1 до 5:\n\n"
+        "Но сначала давай познакомимся 🙂"
+    )
 
-# === ОТПРАВКА РАСШИФРОВКИ ОЦЕНОК ===
-def send_rating_guide(chat_id):
-    # Удаляем старую расшифровку если есть
-    if chat_id in user_rating_guide:
-        try:
-            bot.delete_message(chat_id, user_rating_guide[chat_id])
-        except:
-            pass
-    
-    # Отправляем новую расшифровку
-    msg = send_message(chat_id, RATING_GUIDE_MESSAGE, parse_mode='Markdown')
-    if msg:
-        user_rating_guide[chat_id] = msg.message_id
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🚀 Начать", callback_data="start_test"))
 
+    bot.send_message(chat_id, welcome_text, reply_markup=kb)
+    user_metadata[chat_id] = {}  # Инициализируем как словарь
+
+# Обработка нажатия кнопки "Начать"
 @bot.callback_query_handler(func=lambda call: call.data == 'start_test')
 def handle_start_button(call):
     chat_id = call.message.chat.id
-    try:
-        bot.delete_message(chat_id, call.message.message_id)
-    except:
-        pass
+
+    # Удаляем кнопку (оставляя сообщение)
+    bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
+
+    # Подготавливаем таблицу
+    prepare_spreadsheet()
     
-    # Очищаем предыдущие сообщения
-    cleanup_chat(chat_id)
-    
+    # Запускаем сценарий
+    user_metadata[chat_id] = {}
+    user_progress[chat_id] = 1  # Начинаем с первого трека
+    user_rated_tracks[chat_id] = set()
     ask_gender(chat_id)
 
-# === ВЫБОР ПОЛА И ВОЗРАСТА ===
+# Запрос пола
 def ask_gender(chat_id):
     kb = types.InlineKeyboardMarkup()
     kb.add(
         types.InlineKeyboardButton("Мужской", callback_data="gender_M"),
         types.InlineKeyboardButton("Женский", callback_data="gender_F")
     )
-    send_message(chat_id, "Укажите ваш пол:", reply_markup=kb)
+    bot.send_message(chat_id, "Укажи свой пол:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("gender_"))
 def handle_gender(c):
     chat_id = c.message.chat.id
-    gender = c.data.split('_', 1)[1]
-    
-    conn = sqlite3.connect('database.db')
-    cur = conn.cursor()
-    cur.execute("UPDATE users SET gender = ? WHERE chat_id = ?", (gender, chat_id))
-    conn.commit()
-    conn.close()
-    
-    try:
-        bot.delete_message(chat_id, c.message.message_id)
-    except:
-        pass
-    
-    # Очищаем чат перед следующим вопросом
-    cleanup_chat(chat_id)
+    user_metadata[chat_id]['gender'] = c.data.split('_',1)[1]
+    bot.delete_message(chat_id, c.message.message_id)
     ask_age(chat_id)
 
 def ask_age(chat_id):
     opts = ["до 24", "25-34", "35-44", "45-54", "55+"]
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    buttons = [types.InlineKeyboardButton(o, callback_data=f"age_{o}") for o in opts]
-    kb.add(*buttons)
-    send_message(chat_id, "Укажите ваш возраст:", reply_markup=kb)
+    kb = types.InlineKeyboardMarkup(row_width=3)
+    for o in opts:
+        kb.add(types.InlineKeyboardButton(o, callback_data=f"age_{o}"))
+    bot.send_message(chat_id, "Укажи свой возраст:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("age_"))
 def handle_age(c):
     chat_id = c.message.chat.id
-    age = c.data.split('_', 1)[1]
-    
-    conn = sqlite3.connect('database.db')
-    cur = conn.cursor()
-    cur.execute("UPDATE users SET age = ? WHERE chat_id = ?", (age, chat_id))
-    conn.commit()
-    conn.close()
-    
-    try:
-        bot.delete_message(chat_id, c.message.message_id)
-    except:
-        pass
-    
-    # Очищаем чат перед началом теста
-    cleanup_chat(chat_id)
-    
-    conn = sqlite3.connect('database.db')
-    cur = conn.cursor()
-    cur.execute("SELECT username, first_name FROM users WHERE chat_id = ?", (chat_id,))
-    user_info = cur.fetchone()
-    conn.close()
-    
-    username_display = f"@{user_info[0]}" if user_info[0] else user_info[1]
-    
-    send_message(
-        chat_id, 
-        f"Спасибо, {username_display}! 🎶\n\n"
-        "Теперь начнем слепой тест. Удачи в розыгрыше! 🎁"
-    )
-    
-    # Отправляем расшифровку оценок
-    send_rating_guide(chat_id)
-    
-    send_track(chat_id, 0)
+    user_metadata[chat_id]['age'] = c.data.split('_',1)[1]
+    bot.delete_message(chat_id, c.message.message_id)
 
-# === ОТПРАВКА ТРЕКА ===
-def send_track(chat_id, track_index):
-    # Очищаем предыдущие сообщения, но сохраняем расшифровку оценок
-    cleanup_chat(chat_id, keep_rating_guide=True)
+    # Настраиваем столбец для пользователя
+    username = c.from_user.username
+    col = setup_user_column(chat_id, username)
+
+    # Запускаем тест
+    bot.send_message(chat_id, "🎵 Начинаем музыкальный тест!\n\nОцени каждый трек по шкале от 1 до 5:\n\n1 ★ - Совсем не нравится\n2 ★★ - Скорее не нравится\n3 ★★★ - Нейтрально\n4 ★★★★ - Нравится\n5 ★★★★★ - Очень нравится")
+    send_next_track(chat_id)
+
+# === Отправка и оценка треков ===
+def send_next_track(chat_id):
+    n = user_progress.get(chat_id, 1)
+    path = os.path.join(AUDIO_FOLDER, f"{n:03}.mp3")
     
-    if track_index >= len(track_numbers):
-        conn = sqlite3.connect('database.db')
-        cur = conn.cursor()
-        cur.execute("SELECT username, first_name FROM users WHERE chat_id = ?", (chat_id,))
-        user_info = cur.fetchone()
-        conn.close()
-        
-        username_display = f"@{user_info[0]}" if user_info[0] else user_info[1]
-        
-        send_message(
-            chat_id, 
-            f"🎉 {username_display}, тест завершён! Спасибо за участие!\n\n"
-            "Результаты сохранены. Следите за новостями для розыгрыша подарков в @RadioMlR_Efir! 🎁"
-        )
+    if not os.path.exists(path):
+        # Тест завершен
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("Начать сначала", callback_data="restart"))
+        bot.send_message(chat_id, "🎉 Тест завершён! Спасибо за участие!\n\nРезультаты сохранены. Следите за новостями для розыгрыша подарков!", reply_markup=kb)
         return
-    
-    track_number = track_numbers[track_index]
-    track_filename = f"{track_number}.mp3"
-    track_path = os.path.join("tracks", track_filename)
-    
-    kb = types.InlineKeyboardMarkup(row_width=5)
-    buttons = [types.InlineKeyboardButton(str(i), callback_data=f"rate_{track_number}_{i}") for i in range(1, 6)]
-    kb.add(*buttons)
-    
-    if os.path.exists(track_path):
-        try:
-            # Отправляем только номер текущего трека
-            progress_text = send_message(chat_id, f"🎵 Трек {track_index + 1}/30")
-            
-            with open(track_path, 'rb') as audio_file:
-                audio_msg = bot.send_audio(chat_id, audio_file, title=f"Трек {track_number}", reply_markup=kb)
-                # Сохраняем ID аудио сообщения для последующего удаления
-                if chat_id not in user_last_message:
-                    user_last_message[chat_id] = []
-                user_last_message[chat_id].append(audio_msg.message_id)
-                
-        except Exception as e:
-            send_message(chat_id, f"❌ Ошибка при отправке трека: {e}")
-            send_track(chat_id, track_index + 1)
-    else:
-        send_message(chat_id, f"⚠️ Трек {track_number} не найден.")
-        send_track(chat_id, track_index + 1)
 
-# === ОБРАБОТКА ОЦЕНКИ ===
-user_rating_time = {}
+    # Отправляем аудио
+    try:
+        with open(path, 'rb') as f:
+            m = bot.send_audio(chat_id, f, caption=f"Трек №{n}")
+            last_audios[chat_id] = m.message_id
+    except Exception as e:
+        bot.send_message(chat_id, f"Ошибка при отправке трека: {e}")
+        return
+
+    # Кнопки для оценки
+    kb = types.InlineKeyboardMarkup(row_width=5)
+    buttons = []
+    for i in range(1, 6):
+        buttons.append(types.InlineKeyboardButton(str(i), callback_data=f"rate_{i}"))
+    kb.add(*buttons)
+    bot.send_message(chat_id, "Оцените этот трек:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rate_"))
-def handle_rating(c):
+def handle_rate(c):
     chat_id = c.message.chat.id
-    data_parts = c.data.split('_')
+    n = user_progress.get(chat_id, 1)
     
-    if len(data_parts) != 3:
+    if n in user_rated_tracks[chat_id]:
+        bot.answer_callback_query(c.id, "Этот трек уже оценен", show_alert=True)
         return
+
+    score = c.data.split('_', 1)[1]
+    col = user_column.get(chat_id)
     
-    track_number = data_parts[1]
-    rating = int(data_parts[2])
-    
-    current_time = time.time()
-    last_rating_time = user_rating_time.get(chat_id, 0)
-    
-    if current_time - last_rating_time < 5:
-        bot.answer_callback_query(c.id, "Пожалуйста, прослушайте трек перед оценкой")
+    if not col:
+        bot.answer_callback_query(c.id, "Ошибка: не найден столбец для сохранения", show_alert=True)
         return
+
+    # Сохраняем оценку в Google Таблицу (строка = номер трека + 2)
+    try:
+        sheet.update_cell(n + 2, col, score)
+    except Exception as e:
+        bot.answer_callback_query(c.id, f"Ошибка сохранения: {e}", show_alert=True)
+        return
+
+    user_rated_tracks[chat_id].add(n)
     
-    user_rating_time[chat_id] = current_time
-    
-    track_num = int(track_number)
-    save_rating(chat_id, track_num, rating)
-    
-    # Удаляем сообщение с кнопками
+    # Удаляем сообщение с аудио и кнопками
+    try:
+        bot.delete_message(chat_id, last_audios[chat_id])
+    except:
+        pass
     try:
         bot.delete_message(chat_id, c.message.message_id)
     except:
         pass
-    
-    # Очищаем чат перед следующим треком, но сохраняем расшифровку оценок
-    cleanup_chat(chat_id, keep_rating_guide=True)
-    
-    next_track_index = get_user_progress(chat_id)
-    send_track(chat_id, next_track_index)
 
-# === СЛУЖЕБНЫЕ КОМАНДЫ ДЛЯ АДМИНИСТРАТОРА ===
-@bot.message_handler(commands=['stats'])
-def show_stats(message):
-    if str(message.chat.id) != ADMIN_CHAT_ID:
-        return
-    
-    conn = sqlite3.connect('database.db')
-    c = conn.cursor()
-    
-    c.execute("SELECT COUNT(*) FROM users")
-    total_users = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(*) FROM users WHERE completed = 1")
-    completed_users = c.fetchone()[0]
-    
-    c.execute("SELECT gender, COUNT(*) FROM users WHERE gender != '' GROUP BY gender")
-    gender_stats = c.fetchall()
-    
-    c.execute("SELECT age, COUNT(*) FROM users WHERE age != '' GROUP BY age")
-    age_stats = c.fetchall()
-    
-    conn.close()
-    
-    stats_text = f"""📊 Статистика теста:
-    
-👥 Пользователи:
-• Всего: {total_users}
-• Завершили тест: {completed_users}
-• В процессе: {total_users - completed_users}
+    # Переходим к следующему треку
+    user_progress[chat_id] = n + 1
+    send_next_track(chat_id)
 
-🚻 Распределение по полу:"""
+@bot.callback_query_handler(func=lambda c: c.data == "restart")
+def handle_restart(c):
+    chat_id = c.message.chat.id
+    bot.delete_message(chat_id, c.message.message_id)
     
-    for gender, count in gender_stats:
-        stats_text += f"\n• {gender}: {count}"
+    # Очищаем состояние пользователя
+    if chat_id in user_metadata:
+        del user_metadata[chat_id]
+    if chat_id in user_progress:
+        del user_progress[chat_id]
+    if chat_id in user_rated_tracks:
+        del user_rated_tracks[chat_id]
+    if chat_id in user_column:
+        del user_column[chat_id]
     
-    stats_text += "\n\n🎂 Распределение по возрасту:"
-    for age, count in age_stats:
-        stats_text += f"\n• {age}: {count}"
-    
-    bot.send_message(ADMIN_CHAT_ID, stats_text)
+    # Запускаем заново
+    welcome_handler(c.message)
 
-@bot.message_handler(commands=['backup'])
-def backup_database(message):
-    if str(message.chat.id) != ADMIN_CHAT_ID:
-        return
-    
-    try:
-        with open("database.db", "rb") as f:
-            bot.send_document(ADMIN_CHAT_ID, f, caption="🔐 Резервная копия базы данных")
-    except Exception as e:
-        bot.send_message(ADMIN_CHAT_ID, f"❌ Ошибка при создании бэкапа: {e}")
+@bot.message_handler(func=lambda m: True)
+def fallback(m):
+    bot.send_message(m.chat.id, "Для начала теста нажмите /start")
 
-@bot.message_handler(commands=['results'])
-def export_results(message):
-    if str(message.chat.id) != ADMIN_CHAT_ID:
-        return
-    
-    try:
-        export_to_csv()
-        # Отправляем все CSV файлы
-        with open("users_export.csv", "rb") as f1, open("ratings_export.csv", "rb") as f2, open("combined_results.csv", "rb") as f3:
-            bot.send_document(ADMIN_CHAT_ID, f1, caption="📊 Пользователи (CSV)")
-            bot.send_document(ADMIN_CHAT_ID, f2, caption="📈 Оценки (CSV)")
-            bot.send_document(ADMIN_CHAT_ID, f3, caption="📋 Объединенные результаты (CSV)")
-    except Exception as e:
-        bot.send_message(ADMIN_CHAT_ID, f"❌ Ошибка при экспорте: {e}")
-
-# === FLASK WEBHOOK ===
-@app.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
-    if request.headers.get('content-type') == 'application/json':
-        json_str = request.get_data().decode('UTF-8')
-        update = telebot.types.Update.de_json(json_str)
-        bot.process_new_updates([update])
-        return "ok", 200
-    return "Bad Request", 400
-
-@app.route("/", methods=["GET"])
-def index():
-    return "Слепой музыкальный тест бот работает! 🎵", 200
-
-# === ЗАПУСК ===
 if __name__ == "__main__":
-    init_db()
-    
-    try:
-        bot.send_message(ADMIN_CHAT_ID, "✅ Бот запущен и готов к работе!")
-    except:
-        print("Не удалось отправить уведомление администратору.")
-    
-    port = int(os.environ.get("PORT", 5000))
-    
-    if not os.environ.get("DEBUG"):
-        bot.remove_webhook()
-        bot.set_webhook(url=f"https://musicbot-knqj.onrender.com/{TOKEN}")
-    
-    app.run(host="0.0.0.0", port=port, debug=os.environ.get("DEBUG"))
+    print("Бот запущен и готов к работе!")
+    bot.polling(none_stop=True)
