@@ -35,7 +35,17 @@ def initialize_google_sheets():
             print("❌ Файл creds.json не найден")
             return False
         
-        creds = ServiceAccountCredentials.from_json_keyfile_name('creds.json', scope)
+        import json
+from oauth2client.service_account import ServiceAccountCredentials
+import os
+
+creds_json_str = os.environ.get('creds.json')
+if not creds_json_str:
+    print("❌ creds.json не задан")
+else:
+    creds_dict = json.loads(creds_json_str)
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    client = gspread.authorize(creds)
         client = gspread.authorize(creds)
         spreadsheet = client.open(SPREADSHEET_NAME)
         worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
