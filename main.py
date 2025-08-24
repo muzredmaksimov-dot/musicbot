@@ -12,9 +12,9 @@ TOKEN = '8109304672:AAHkOQ8kzQLmHupii78YCd-1Q4HtDKWuuNk'
 AUDIO_FOLDER = 'audio'
 SPREADSHEET_NAME = 'music_testing'
 WORKSHEET_NAME = 'track_list'
-WEBHOOK_URL = os.environ.get('RENDER_EXTERNAL_URL', '') + '/' + TOKEN
 
-# === Инициализация Flask ===
+# === Инициализация ===
+bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
 # === Google Sheets авторизация ===
@@ -23,18 +23,11 @@ scope = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-# Глобальные переменные
-bot = None
 worksheet = None
 track_data = {}
 
-def initialize_bot():
-    global bot, worksheet, track_data
-    
-    # Инициализация бота
-    bot = telebot.TeleBot(TOKEN)
-    
-    # Инициализация Google Sheets
+def initialize_google_sheets():
+    global worksheet
     if os.path.exists('creds.json'):
         try:
             creds = ServiceAccountCredentials.from_json_keyfile_name('creds.json', scope)
@@ -44,11 +37,11 @@ def initialize_bot():
             print("Успешно подключено к Google Таблице!")
         except Exception as e:
             print(f"Ошибка Google Sheets: {e}")
-            worksheet = None
     else:
         print("Файл creds.json не найден")
-    
-    # Загрузка треков
+
+def load_track_data():
+    global track_data
     try:
         with open('track_list.csv', newline='', encoding='utf-8') as f:
             reader = csv.DictReader(f)
@@ -56,7 +49,6 @@ def initialize_bot():
         print(f"Загружено {len(track_data)} треков")
     except Exception as e:
         print(f"Ошибка загрузки треков: {e}")
-        track_data = {}
 
 # Словари состояния
 user_states = {}
@@ -230,7 +222,7 @@ def handle_all_messages(message):
     bot.send_message(message.chat.id, "Для начала теста нажмите /start")
 
 # === Вебхук обработчики ===
-@app.route('/' + TOKEN, methods=['POST'])
+@app.route('/webhook/' + TOKEN, methods=['POST'])
 def webhook():
     if request.headers.get('content-type') == 'application/json':
         json_string = request.get_data().decode('utf-8')
@@ -243,19 +235,17 @@ def webhook():
 def index():
     return 'Music Test Bot is running!'
 
-@app.route('/set_webhook')
-def set_webhook():
-    if WEBHOOK_URL:
-        bot.remove_webhook()
-        bot.set_webhook(url=WEBHOOK_URL)
-        return f'Webhook set to: {WEBHOOK_URL}'
-    return 'WEBHOOK_URL not set'
+@app.route('/health')
+def health():
+    return 'OK'
 
 if __name__ == "__main__":
-    initialize_bot()
+    # Инициализируем Google Sheets и данные треков
+    initialize_google_sheets()
+    load_track_data()
     
-    # Для локального тестирования используем polling
-    if os.environ.get('RENDER'):
+    # Для Render используем Flask, для локального тестирования - polling
+    if 'RENDER' in os.environ:
         print("Running on Render - using webhook")
         port = int(os.environ.get('PORT', 10000))
         app.run(host='0.0.0.0', port=port)
