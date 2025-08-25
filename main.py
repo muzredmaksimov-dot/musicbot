@@ -82,7 +82,7 @@ def save_to_google_sheets(user_data, ratings):
 
 import csv
 
-def save_to_csv(user_data, ratings):
+def save_answer_to_csv(user_data, track, rating):
     file_exists = os.path.exists(CSV_FILE)
 
     with open(CSV_FILE, mode="a", newline="", encoding="utf-8") as f:
@@ -90,21 +90,21 @@ def save_to_csv(user_data, ratings):
 
         # Если файла нет — создаём заголовки
         if not file_exists:
-            headers = ['User ID', 'Username', 'Gender', 'Age', ]
-            for i in range(1, len(track_data) + 1):
-                headers.append(f'Track {i}')
+            headers = ['User ID', 'Username', 'First Name', 'Gender', 'Age', 'Track', 'Rating']
             writer.writerow(headers)
 
-        # Формируем строку с данными
+        # Записываем одну строку
         row = [
-            user_data['user_id'],
+            user_data.get('user_id', ''),
             f"@{user_data['username']}" if user_data.get('username') else '',
+            user_data.get('first_name', ''),
             user_data.get('gender', ''),
             user_data.get('age', ''),
+            track,
+            rating
         ]
-        for i in range(1, len(track_data) + 1):
-            row.append(ratings.get(str(i), ''))
         writer.writerow(row)
+
 
 def save_to_csv_backup(user_data, ratings):
     try:
