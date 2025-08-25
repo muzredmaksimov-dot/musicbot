@@ -141,7 +141,6 @@ user_states = {}
 
 # === РАСШИФРОВКА ОЦЕНОК ===
 RATING_GUIDE_MESSAGE = """
-🎵 **Шкала оценок:**
 
 1️⃣  - Не нравится
 2️⃣  - Раньшн нравилась, но надоела  
@@ -336,7 +335,7 @@ def send_results(message):
     try:
         if os.path.exists(CSV_FILE):
             with open(CSV_FILE, 'rb') as f:
-                bot.send_document(chat_id, f, caption="📊 Резервные результаты (CSV)")
+                bot.send_document(chat_id, f, caption="результаты (CSV)")
         else:
             bot.send_message(chat_id, "❌ Файл backup_results.csv пока не создан.")
     except Exception as e:
