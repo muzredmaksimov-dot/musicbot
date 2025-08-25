@@ -15,6 +15,7 @@ ADMIN_CHAT_ID = "866964827"
 AUDIO_FOLDER = "tracks"
 SPREADSHEET_NAME = "music_testing"
 WORKSHEET_NAME = "track_list"
+CSV_FILE = "backup_results.csv"
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
@@ -65,7 +66,6 @@ def save_to_google_sheets(user_data, ratings):
             user_data.get('last_name',''),
             user_data['gender'],
             user_data['age'],
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ]
 
         for i in range(1,31):
@@ -80,13 +80,39 @@ def save_to_google_sheets(user_data, ratings):
         print(f"❌ Ошибка записи в Google Таблицу: {e}")
         return False
 
+import csv
+
+def save_to_csv(user_data, ratings):
+    file_exists = os.path.exists(CSV_FILE)
+
+    with open(CSV_FILE, mode="a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+
+        # Если файла нет — создаём заголовки
+        if not file_exists:
+            headers = ['User ID', 'Username', 'Gender', 'Age', ]
+            for i in range(1, len(track_data) + 1):
+                headers.append(f'Track {i}')
+            writer.writerow(headers)
+
+        # Формируем строку с данными
+        row = [
+            user_data['user_id'],
+            f"@{user_data['username']}" if user_data.get('username') else '',
+            user_data.get('gender', ''),
+            user_data.get('age', ''),
+        ]
+        for i in range(1, len(track_data) + 1):
+            row.append(ratings.get(str(i), ''))
+        writer.writerow(row)
+
 def save_to_csv_backup(user_data, ratings):
     try:
         file_exists = os.path.exists('backup_results.csv')
         with open('backup_results.csv','a',newline='',encoding='utf-8') as f:
             writer = csv.writer(f)
             if not file_exists:
-                headers = ['user_id','username','first_name','last_name','gender','age','timestamp']
+                headers = ['user_id','username','first_name','last_name','gender','age',]
                 for i in range(1,31):
                     headers.append(f'track_{i}')
                 writer.writerow(headers)
@@ -97,7 +123,6 @@ def save_to_csv_backup(user_data, ratings):
                 user_data.get('last_name',''),
                 user_data['gender'],
                 user_data['age'],
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             ]
             for i in range(1,31):
                 row_data.append(ratings.get(str(i),''))
@@ -223,9 +248,8 @@ def handle_age(c):
     user_states[chat_id]['user_data']['age'] = age
     try: bot.delete_message(chat_id,c.message.message_id)
     except: pass
-    cleanup_chat(chat_id)
     username_display = f"@{user_states[chat_id]['user_data']['username']}" if user_states[chat_id]['user_data']['username'] else user_states[chat_id]['user_data']['first_name']
-    send_message(chat_id,f"Спасибо, {username_display}! 🎶\n\nТеперь начнем слепой тест. Удачи! 🎁")
+    send_message(chat_id,f"Спасибо, {username_display}! 🎶\n\nТеперь начнем тест. Удачи! 🎁")
     send_rating_guide(chat_id)
     send_track(chat_id)
 
@@ -281,9 +305,9 @@ def finish_test(chat_id):
     csv_success = save_to_csv_backup(user_data, ratings)
     username_display = f"@{user_data['username']}" if user_data['username'] else user_data['first_name']
     if google_success:
-        send_message(chat_id,f"🎉 {username_display}, тест завершён! Результаты сохранены в Google Таблицу.\n\nСледите за новостями для розыгрыша подарков! 🎁")
+        send_message(chat_id,f"🎉 {username_display}, тест завершён!.\n\nСледите за новостями в @RadioMlR_Efir для розыгрыша подарков! 🎁")
     elif csv_success:
-        send_message(chat_id,f"🎉 {username_display}, тест завершён! Результаты сохранены в CSV.\n\nСледите за новостями для розыгрыша подарков! 🎁")
+        send_message(chat_id,f"🎉 {username_display}, тест завершён!.\n\nСледите за новостями в @RadioMlR_Efir для розыгрыша подарков! 🎁")
     else:
         send_message(chat_id,"⚠️ Тест завершен! Ошибка при сохранении.")
 
@@ -300,6 +324,23 @@ def webhook():
 def index(): return 'Music Test Bot running!'
 @app.route('/health')
 def health(): return 'OK'
+
+# === КОМАНДА /results (только для админа) ===
+@bot.message_handler(commands=['results'])
+def send_results(message):
+    chat_id = message.chat.id
+    if str(chat_id) != str(ADMIN_CHAT_ID):
+        bot.send_message(chat_id, "⛔ У вас нет доступа к этой команде.")
+        return
+    
+    try:
+        if os.path.exists(CSV_FILE):
+            with open(CSV_FILE, 'rb') as f:
+                bot.send_document(chat_id, f, caption="📊 Резервные результаты (CSV)")
+        else:
+            bot.send_message(chat_id, "❌ Файл backup_results.csv пока не создан.")
+    except Exception as e:
+        bot.send_message(chat_id, f"⚠️ Ошибка при отправке файла: {e}")
 
 # === ЗАПУСК ===
 if __name__=="__main__":
