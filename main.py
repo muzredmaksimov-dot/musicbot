@@ -28,13 +28,9 @@ def initialize_google_sheets():
     global worksheet
     try:
         creds_json_str = os.environ.get('GOOGLE_CREDS_JSON')
-        creds_b64 = os.environ.get('GOOGLE_CREDS_B64')
 
         if creds_json_str:
             creds_dict = json.loads(creds_json_str)
-        elif creds_b64:
-            import base64
-            creds_dict = json.loads(base64.b64decode(creds_b64).decode('utf-8'))
         elif os.path.exists('creds.json'):
             with open('creds.json', 'r', encoding='utf-8') as f:
                 creds_dict = json.load(f)
