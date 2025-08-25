@@ -295,7 +295,24 @@ def webhook():
 def index(): return 'Music Test Bot running!'
 @app.route('/health')
 def health(): return 'OK'
-
+    
+# === КОМАНДА /results (только для админа) ===
+@bot.message_handler(commands=['results'])
+def send_results(message):
+    chat_id = message.chat.id
+    if str(chat_id) != str(ADMIN_CHAT_ID):
+        bot.send_message(chat_id, "⛔ У вас нет доступа к этой команде.")
+        return
+    
+    try:
+        if os.path.exists(CSV_FILE):
+            with open(CSV_FILE, 'rb') as f:
+                bot.send_document(chat_id, f, caption="📊 Резервные результаты (CSV)")
+        else:
+            bot.send_message(chat_id, "❌ Файл backup_results.csv пока не создан.")
+    except Exception as e:
+        bot.send_message(chat_id, f"⚠️ Ошибка при отправке файла: {e}")
+        
 # === ЗАПУСК ===
 if __name__=="__main__":
     initialize_google_sheets()
