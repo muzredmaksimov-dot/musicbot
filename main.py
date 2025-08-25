@@ -79,6 +79,31 @@ def save_to_google_sheets(user_data, ratings):
     except Exception as e:
         print(f"❌ Ошибка записи в Google Таблицу: {e}")
         return False
+        
+        import csv
+def save_to_csv(user_data, ratings):
+    file_exists = os.path.exists(CSV_FILE)
+
+    with open(CSV_FILE, mode="a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+
+        # Если файла нет — создаём заголовки
+        if not file_exists:
+            headers = ['User ID', 'Username', 'Gender', 'Age',]
+            for i in range(1, len(track_data) + 1):
+                headers.append(f'Track {i}')
+            writer.writerow(headers)
+
+        # Формируем строку с данными
+        row = [
+            user_data['user_id'],
+            f"@{user_data['username']}" if user_data.get('username') else '',
+            user_data.get('gender', ''),
+            user_data.get('age', ''),
+        ]
+        for i in range(1, len(track_data) + 1):
+            row.append(ratings.get(str(i), ''))
+        writer.writerow(row)
 
 def save_to_csv_backup(user_data, ratings):
     try:
