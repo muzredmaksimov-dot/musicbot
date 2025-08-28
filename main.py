@@ -309,7 +309,7 @@ def handle_age(c):
     username_display = f"@{user_states[chat_id]['user_data']['username']}" if user_states[chat_id]['user_data']['username'] else user_states[chat_id]['user_data']['first_name']
     send_message(chat_id,f"Спасибо, {username_display}! 🎶\n\nТеперь начнем тест. Удачи! 🎁")
 
-    time.sleep(3)
+    time.sleep(1)
     
     send_rating_guide(chat_id)
     send_track(chat_id)
