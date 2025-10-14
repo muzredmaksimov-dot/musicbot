@@ -468,38 +468,67 @@ def reset_all(message):
         bot.send_message(chat_id, "⛔ У вас нет доступа к этой команде.")
         return
 
-    # 1️⃣ Уведомим всех пользователей о новом тесте
-    bot.send_message(chat_id, "🔄 Начинаю сброс всех данных и уведомление пользователей...")
+    bot.send_message(chat_id, "🔄 Начинаю сброс всех данных...")
 
     global user_last_message, user_rating_guide, user_rating_time, user_states
-    all_users = list(user_states.keys())  # список всех активных пользователей
+    all_users = list(user_states.keys())
 
-    for uid in all_users:
-        try:
-            send_message(uid, "🎵 Новый музыкальный тест начался! Нажмите /start, чтобы пройти его заново 🚀")
-            cleanup_chat(uid)  # очищаем чат
-        except Exception as e:
-            print(f"Ошибка при уведомлении или очистке {uid}: {e}")
-
-    # 2️⃣ Полностью очищаем внутренние данные
+    # 1️⃣ Очищаем внутренние данные
     user_last_message.clear()
     user_rating_guide.clear()
     user_rating_time.clear()
     user_states.clear()
 
-    # 3️⃣ Удаляем CSV файл
+    # 2️⃣ Удаляем локальный CSV файл
     try:
         if os.path.exists(CSV_FILE):
             os.remove(CSV_FILE)
-            bot.send_message(chat_id, "✅ CSV файл успешно удалён.")
+            bot.send_message(chat_id, "✅ Локальный CSV-файл успешно удалён.")
         else:
-            bot.send_message(chat_id, "ℹ️ CSV файл отсутствует — пропускаем.")
+            bot.send_message(chat_id, "ℹ️ Локальный CSV-файл не найден — пропускаем.")
     except Exception as e:
         bot.send_message(chat_id, f"⚠️ Ошибка при удалении CSV: {e}")
 
-    # 4️⃣ Подтверждаем завершение сброса
-    bot.send_message(chat_id, "♻️ Все данные и чаты пользователей сброшены.\nБот готов к новому тесту!")
+    # 3️⃣ Удаляем CSV-файл на GitHub
+    if GITHUB_TOKEN:
+        try:
+            url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{CSV_FILE}"
+            headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+            r_get = requests.get(url, headers=headers)
+            if r_get.status_code == 200:
+                sha = r_get.json().get("sha")
+                if sha:
+                    r_del = requests.delete(url, headers=headers, json={"message": "Reset all data", "sha": sha})
+                    if r_del.status_code in (200, 204):
+                        bot.send_message(chat_id, "✅ CSV-файл удалён с GitHub.")
+                    else:
+                        bot.send_message(chat_id, f"⚠️ Ошибка удаления с GitHub: {r_del.status_code}")
+                else:
+                    bot.send_message(chat_id, "⚠️ SHA файла не найден — не удалось удалить с GitHub.")
+            elif r_get.status_code == 404:
+                bot.send_message(chat_id, "ℹ️ CSV-файл на GitHub не найден — пропускаем.")
+            else:
+                bot.send_message(chat_id, f"⚠️ Ошибка GitHub API: {r_get.status_code}")
+        except Exception as e:
+            bot.send_message(chat_id, f"⚠️ Ошибка при попытке удалить файл с GitHub: {e}")
+    else:
+        bot.send_message(chat_id, "⚠️ GITHUB_TOKEN не настроен — пропуск удаления с GitHub.")
 
+    # 4️⃣ Уведомляем всех пользователей о новом тесте
+    for uid in all_users:
+        try:
+            kb = types.InlineKeyboardMarkup()
+            kb.add(types.InlineKeyboardButton("🚀 Начать тест", callback_data="start_test"))
+            bot.send_message(
+                uid,
+                "🎧 Новый музыкальный тест готов!\n\n"
+                "Нажмите «🚀 Начать тест», чтобы пройти его заново и поучаствовать в розыгрыше 🎁",
+                reply_markup=kb
+            )
+        except Exception as e:
+            print(f"Ошибка при уведомлении пользователя {uid}: {e}")
+
+    bot.send_message(chat_id, "♻️ Все данные сброшены. Пользователи могут проходить тест заново.")
     # Очистка GitHub CSV
     if GITHUB_TOKEN:
         try:
