@@ -10,7 +10,7 @@ import requests
 import base64
 
 # === НАСТРОЙКИ ===
-TOKEN = "ВАШ_ТОКЕН"
+TOKEN = "8109304672:AAHkOQ8kzQLmHupii78YCd-1Q4HtDKWuuNk"
 ADMIN_CHAT_ID = "866964827"
 AUDIO_FOLDER = "tracks"
 CSV_FILE = "backup_results.csv"
