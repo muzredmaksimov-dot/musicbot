@@ -460,8 +460,113 @@ def send_results(message):
     except Exception as e:
         bot.send_message(chat_id, f"⚠️ Ошибка при отправке файла: {e}")
 
-# === КОМАНДА /reset_all (только для админа) ===
-)
+# === КОМАНДА администратора: полный сброс состояний и очистка CSV (и GitHub) ===
+def overwrite_github_file(repo, path_in_repo, token, new_text, commit_message=None):
+    """
+    Перезаписывает файл path_in_repo в repo новым текстом new_text.
+    Если файла нет — создаёт.
+    Возвращает True/False.
+    """
+    url = f"https://api.github.com/repos/{repo}/contents/{path_in_repo}"
+    headers = {"Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = f"token {token}"
+
+    try:
+        r_get = requests.get(url, headers=headers)
+    except Exception as e:
+        print("Ошибка GitHub GET:", e)
+        return False
+
+    content_b64 = base64.b64encode(new_text.encode("utf-8")).decode("utf-8")
+    payload = {
+        "message": commit_message or f"Reset CSV by admin @ {datetime.utcnow().isoformat()}",
+        "content": content_b64,
+    }
+
+    if r_get.status_code == 200:
+        try:
+            sha = r_get.json().get("sha")
+            payload["sha"] = sha
+            r_put = requests.put(url, headers=headers, json=payload)
+            if r_put.status_code in (200, 201):
+                print("✅ GitHub: файл перезаписан")
+                return True
+            else:
+                print("❌ GitHub PUT error:", r_put.status_code, r_put.text)
+                return False
+        except Exception as e:
+            print("Ошибка при перезаписи файла на GitHub:", e)
+            return False
+    elif r_get.status_code == 404:
+        # создаём файл
+        try:
+            r_put = requests.put(url, headers=headers, json=payload)
+            if r_put.status_code in (200, 201):
+                print("✅ GitHub: файл создан")
+                return True
+            else:
+                print("❌ GitHub create error:", r_put.status_code, r_put.text)
+                return False
+        except Exception as e:
+            print("Ошибка при создании файла в GitHub:", e)
+            return False
+    else:
+        print(f"GitHub GET unexpected: {r_get.status_code} {r_get.text}")
+        return False
+
+
+@bot.message_handler(commands=['reset_all'])
+def handle_reset_all(message):
+    chat_id = message.chat.id
+    # доступ только для администратора
+    if str(chat_id) != str(ADMIN_CHAT_ID):
+        bot.send_message(chat_id, "⛔ У вас нет доступа к этой команде.")
+        return
+
+    args = message.text.split()
+    announce = False
+    if len(args) > 1 and args[1].lower() in ("announce", "send", "1"):
+        announce = True
+
+    bot.send_message(chat_id, "Запускаю полный сброс: очищаю чаты и CSV.")
+
+    # Список всех чатов, где есть записи
+    chats_from_last = list(user_last_message.keys())
+    chats_from_states = list(user_states.keys())
+    chats_from_guides = list(user_rating_guide.keys())
+    all_chats = list(set(chats_from_last) | set(chats_from_states) | set(chats_from_guides))
+
+    deleted_messages = 0
+    for u_chat in all_chats:
+        # удаляем все сохранённые сообщения
+        msg_ids = user_last_message.get(u_chat, [])[:]
+        for m_id in msg_ids:
+            try:
+                bot.delete_message(u_chat, m_id)
+                deleted_messages += 1
+            except Exception:
+                pass
+
+        # удаляем отдельно запись с расшифровкой (если осталась)
+        rg_id = user_rating_guide.get(u_chat)
+        if rg_id:
+            try:
+                bot.delete_message(u_chat, rg_id)
+                deleted_messages += 1
+            except Exception:
+                pass
+
+        # опциональная рассылка приветствия с кнопкой (не навязываем)
+        if announce:
+            try:
+                kb = types.InlineKeyboardMarkup()
+                kb.add(types.InlineKeyboardButton("🚀 Начать тест", callback_data="start_test"))
+                welcome_text = (
+                    "Привет! 🎵\n\n"
+                    "Вы прослушаете 30 музыкальных фрагментов и оцените каждый по шкале от 1 до 5.\n\n"
+                    "🎁 После теста среди всех участников будет розыгрыш подарков!\n\n"
+                    "_нажимая «Начать тест» вы даёте согласие на обработку персональных данных_")
                 sent = bot.send_message(u_chat, welcome_text, reply_markup=kb, parse_mode='Markdown')
                 user_last_message.setdefault(u_chat, []).append(sent.message_id)
             except Exception:
