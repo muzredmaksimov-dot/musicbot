@@ -286,15 +286,18 @@ def reset_all(message):
         bot.send_message(ADMIN_CHAT_ID, "✅ Все данные очищены (без рассылки).")
 
 # === ЗАПУСК ===
-@app.route(f"/webhook/{TOKEN}", methods=["POST"])
+@app.route(f'/webhook/{TOKEN}', methods=['POST'])
 def webhook():
-    update = telebot.types.Update.de_json(request.get_data().decode("utf-8"))
-    bot.process_new_updates([update])
-    return "ok", 200
+    if request.headers.get('content-type')=='application/json':
+        update = telebot.types.Update.de_json(request.get_data().decode('utf-8'))
+        bot.process_new_updates([update])
+        return ''
+    return 'Bad Request',400
 
-@app.route("/")
-def index():
-    return "Music Test Bot active"
+@app.route('/')
+def index(): return 'Music Test Bot running!'
+@app.route('/health')
+def health(): return 'OK'
 
 if __name__ == "__main__":
     print("🚀 Бот запущен")
