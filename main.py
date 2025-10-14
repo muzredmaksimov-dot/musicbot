@@ -299,7 +299,7 @@ def index(): return 'Music Test Bot running!'
 @app.route('/health')
 def health(): return 'OK'
 
-if __name__ == "__main__":
+if __name__=="__main__":
     print("🚀 Бот запущен")
     if "RENDER" in os.environ:
         bot.remove_webhook()
