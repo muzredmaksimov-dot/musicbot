@@ -468,24 +468,37 @@ def reset_all(message):
         bot.send_message(chat_id, "⛔ У вас нет доступа к этой команде.")
         return
 
-    global user_states, user_last_message, user_rating_guide, user_rating_time
-    user_states.clear()
+    # 1️⃣ Уведомим всех пользователей о новом тесте
+    bot.send_message(chat_id, "🔄 Начинаю сброс всех данных и уведомление пользователей...")
+
+    global user_last_message, user_rating_guide, user_rating_time, user_states
+    all_users = list(user_states.keys())  # список всех активных пользователей
+
+    for uid in all_users:
+        try:
+            send_message(uid, "🎵 Новый музыкальный тест начался! Нажмите /start, чтобы пройти его заново 🚀")
+            cleanup_chat(uid)  # очищаем чат
+        except Exception as e:
+            print(f"Ошибка при уведомлении или очистке {uid}: {e}")
+
+    # 2️⃣ Полностью очищаем внутренние данные
     user_last_message.clear()
     user_rating_guide.clear()
     user_rating_time.clear()
+    user_states.clear()
 
-    # Очистка локального CSV
+    # 3️⃣ Удаляем CSV файл
     try:
         if os.path.exists(CSV_FILE):
-            with open(CSV_FILE, 'w', encoding='utf-8', newline='') as f:
-                writer = csv.writer(f)
-                headers = ['user_id','username','first_name','last_name','gender','age']
-                for i in range(1,31):
-                    headers.append(f'track_{i}')
-                writer.writerow(headers)
-        print("🧹 Локальный CSV очищен.")
+            os.remove(CSV_FILE)
+            bot.send_message(chat_id, "✅ CSV файл успешно удалён.")
+        else:
+            bot.send_message(chat_id, "ℹ️ CSV файл отсутствует — пропускаем.")
     except Exception as e:
-        print("⚠️ Ошибка при очистке локального CSV:", e)
+        bot.send_message(chat_id, f"⚠️ Ошибка при удалении CSV: {e}")
+
+    # 4️⃣ Подтверждаем завершение сброса
+    bot.send_message(chat_id, "♻️ Все данные и чаты пользователей сброшены.\nБот готов к новому тесту!")
 
     # Очистка GitHub CSV
     if GITHUB_TOKEN:
