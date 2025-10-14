@@ -460,6 +460,60 @@ def send_results(message):
     except Exception as e:
         bot.send_message(chat_id, f"⚠️ Ошибка при отправке файла: {e}")
 
+# === КОМАНДА /reset_all (только для админа) ===
+@bot.message_handler(commands=['reset_all'])
+def reset_all(message):
+    chat_id = message.chat.id
+    if str(chat_id) != str(ADMIN_CHAT_ID):
+        bot.send_message(chat_id, "⛔ У вас нет доступа к этой команде.")
+        return
+
+    global user_states, user_last_message, user_rating_guide, user_rating_time
+    user_states.clear()
+    user_last_message.clear()
+    user_rating_guide.clear()
+    user_rating_time.clear()
+
+    # Очистка локального CSV
+    try:
+        if os.path.exists(CSV_FILE):
+            with open(CSV_FILE, 'w', encoding='utf-8', newline='') as f:
+                writer = csv.writer(f)
+                headers = ['user_id','username','first_name','last_name','gender','age']
+                for i in range(1,31):
+                    headers.append(f'track_{i}')
+                writer.writerow(headers)
+        print("🧹 Локальный CSV очищен.")
+    except Exception as e:
+        print("⚠️ Ошибка при очистке локального CSV:", e)
+
+    # Очистка GitHub CSV
+    if GITHUB_TOKEN:
+        try:
+            url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{CSV_FILE}"
+            headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+            r_get = requests.get(url, headers=headers)
+            if r_get.status_code == 200:
+                sha = r_get.json().get("sha")
+                empty_content = base64.b64encode(
+                    ('user_id,username,first_name,last_name,gender,age,' + ','.join([f'track_{i}' for i in range(1,31)]) + '\n').encode("utf-8")
+                ).decode("utf-8")
+                payload = {
+                    "message": f"Очистка backup_results.csv через /reset_all",
+                    "content": empty_content,
+                    "sha": sha
+                }
+                r_put = requests.put(url, headers=headers, json=payload)
+                if r_put.status_code in (200, 201):
+                    print("✅ GitHub CSV успешно очищен.")
+                else:
+                    print(f"⚠️ Ошибка очистки GitHub CSV: {r_put.status_code} {r_put.text}")
+            else:
+                print(f"⚠️ Файл CSV не найден в GitHub: {r_get.status_code}")
+        except Exception as e:
+            print("⚠️ Ошибка при очистке GitHub CSV:", e)
+
+    bot.send_message(chat_id, "✅ Все данные успешно сброшены!\nБот готов к новому тестированию 🎶")
 
 # === ЗАПУСК ===
 if __name__=="__main__":
