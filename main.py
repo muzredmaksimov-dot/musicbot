@@ -461,101 +461,63 @@ def send_results(message):
         bot.send_message(chat_id, f"⚠️ Ошибка при отправке файла: {e}")
 
 # === КОМАНДА /reset_all (только для админа) ===
-@bot.message_handler(commands=['reset_all'])
-def reset_all(message):
-    chat_id = message.chat.id
-    if str(chat_id) != str(ADMIN_CHAT_ID):
-        bot.send_message(chat_id, "⛔ У вас нет доступа к этой команде.")
-        return
+)
+                sent = bot.send_message(u_chat, welcome_text, reply_markup=kb, parse_mode='Markdown')
+                user_last_message.setdefault(u_chat, []).append(sent.message_id)
+            except Exception:
+                # если не удалось доставить (пользователь заблокировал бота и т.п.) — игнорируем
+                pass
 
-    bot.send_message(chat_id, "🔄 Начинаю сброс всех данных...")
+        time.sleep(0.12)  # чтобы не швырять лимиты
 
-    global user_last_message, user_rating_guide, user_rating_time, user_states
-    all_users = list(user_states.keys())
-
-    # 1️⃣ Очищаем внутренние данные
+    # Очистка внутренних словарей (сброс прогресса)
     user_last_message.clear()
     user_rating_guide.clear()
     user_rating_time.clear()
     user_states.clear()
 
-    # 2️⃣ Удаляем локальный CSV файл
+    # --- Очистка локального CSV: перезаписываем только заголовок ---
     try:
-        if os.path.exists(CSV_FILE):
-            os.remove(CSV_FILE)
-            bot.send_message(chat_id, "✅ Локальный CSV-файл успешно удалён.")
-        else:
-            bot.send_message(chat_id, "ℹ️ Локальный CSV-файл не найден — пропускаем.")
-    except Exception as e:
-        bot.send_message(chat_id, f"⚠️ Ошибка при удалении CSV: {e}")
+        headers = ['user_id','username','first_name','last_name','gender','age']
+        for i in range(1,31):
+            headers.append(f'track_{i}')
+        header_line = ",".join(headers) + "\n"
 
-    # 3️⃣ Удаляем CSV-файл на GitHub
+        with open(CSV_FILE, "w", encoding="utf-8", newline="") as f:
+            f.write(header_line)
+
+        csv_cleared = True
+        print("✅ Локальный CSV перезаписан заголовком.")
+    except Exception as e:
+        csv_cleared = False
+        print("❌ Не удалось перезаписать локальный CSV:", e)
+
+    # --- Очистка файла на GitHub (перезаписать тем же заголовком) ---
+    github_cleared = False
     if GITHUB_TOKEN:
         try:
-            url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{CSV_FILE}"
-            headers = {"Authorization": f"token {GITHUB_TOKEN}"}
-            r_get = requests.get(url, headers=headers)
-            if r_get.status_code == 200:
-                sha = r_get.json().get("sha")
-                if sha:
-                    r_del = requests.delete(url, headers=headers, json={"message": "Reset all data", "sha": sha})
-                    if r_del.status_code in (200, 204):
-                        bot.send_message(chat_id, "✅ CSV-файл удалён с GitHub.")
-                    else:
-                        bot.send_message(chat_id, f"⚠️ Ошибка удаления с GitHub: {r_del.status_code}")
-                else:
-                    bot.send_message(chat_id, "⚠️ SHA файла не найден — не удалось удалить с GitHub.")
-            elif r_get.status_code == 404:
-                bot.send_message(chat_id, "ℹ️ CSV-файл на GitHub не найден — пропускаем.")
-            else:
-                bot.send_message(chat_id, f"⚠️ Ошибка GitHub API: {r_get.status_code}")
-        except Exception as e:
-            bot.send_message(chat_id, f"⚠️ Ошибка при попытке удалить файл с GitHub: {e}")
-    else:
-        bot.send_message(chat_id, "⚠️ GITHUB_TOKEN не настроен — пропуск удаления с GitHub.")
-
-    # 4️⃣ Уведомляем всех пользователей о новом тесте
-    for uid in all_users:
-        try:
-            kb = types.InlineKeyboardMarkup()
-            kb.add(types.InlineKeyboardButton("🚀 Начать тест", callback_data="start_test"))
-            bot.send_message(
-                uid,
-                "🎧 Новый музыкальный тест готов!\n\n"
-                "Нажмите «🚀 Начать тест», чтобы пройти его заново и поучаствовать в розыгрыше 🎁",
-                reply_markup=kb
+            github_cleared = overwrite_github_file(
+                GITHUB_REPO,
+                CSV_FILE,
+                GITHUB_TOKEN,
+                header_line,
+                commit_message=f"Reset CSV by admin @ {datetime.utcnow().isoformat()}"
             )
         except Exception as e:
-            print(f"Ошибка при уведомлении пользователя {uid}: {e}")
+            github_cleared = False
+            print("❌ Ошибка при перезаписи GitHub CSV:", e)
+    else:
+        print("⚠️ GITHUB_TOKEN не настроен — пропускаем очистку на GitHub.")
 
-    bot.send_message(chat_id, "♻️ Все данные сброшены. Пользователи могут проходить тест заново.")
-    # Очистка GitHub CSV
-    if GITHUB_TOKEN:
-        try:
-            url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{CSV_FILE}"
-            headers = {"Authorization": f"token {GITHUB_TOKEN}"}
-            r_get = requests.get(url, headers=headers)
-            if r_get.status_code == 200:
-                sha = r_get.json().get("sha")
-                empty_content = base64.b64encode(
-                    ('user_id,username,first_name,last_name,gender,age,' + ','.join([f'track_{i}' for i in range(1,31)]) + '\n').encode("utf-8")
-                ).decode("utf-8")
-                payload = {
-                    "message": f"Очистка backup_results.csv через /reset_all",
-                    "content": empty_content,
-                    "sha": sha
-                }
-                r_put = requests.put(url, headers=headers, json=payload)
-                if r_put.status_code in (200, 201):
-                    print("✅ GitHub CSV успешно очищен.")
-                else:
-                    print(f"⚠️ Ошибка очистки GitHub CSV: {r_put.status_code} {r_put.text}")
-            else:
-                print(f"⚠️ Файл CSV не найден в GitHub: {r_get.status_code}")
-        except Exception as e:
-            print("⚠️ Ошибка при очистке GitHub CSV:", e)
-
-    bot.send_message(chat_id, "✅ Все данные успешно сброшены!\nБот готов к новому тестированию 🎶")
+    # Отправляем результат админу
+    summary = (
+        f"Сброс выполнен.\n"
+        f"Обработано чатов: {len(all_chats)}. Удалено сообщений (прибл.): {deleted_messages}.\n"
+        f"Локальный CSV очищен: {'✅' if csv_cleared else '❌'}.\n"
+        f"GitHub CSV очищен: {'✅' if github_cleared else '❌ или не настроен'}.\n"
+        f"announce={announce}"
+    )
+    bot.send_message(chat_id, summary)
 
 # === ЗАПУСК ===
 if __name__=="__main__":
