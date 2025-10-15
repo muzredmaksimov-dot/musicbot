@@ -255,7 +255,7 @@ def finish_test(chat_id):
     if len(lines) >= 2:
         github_append_line(GITHUB_REPO, CSV_FILE, GITHUB_TOKEN, lines[-1].strip(), header_if_missing=lines[0].strip())
 
-    send_message(chat_id, f"🎉 @{user.get('username') or user['first_name']}, тест завершён!\n\nСледите за новостями в @RadioMlR_Efir 🎁")
+    send_message(chat_id, f"🎉 @{user.get('username') or user['first_name']}, тест завершён!\n\nСледите за новостями в @RadioMIR_Efir 🎁")
 
 # === СБРОС ===
 @bot.message_handler(commands=["reset_all"])
