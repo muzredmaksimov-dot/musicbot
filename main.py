@@ -199,21 +199,28 @@ def handle_age(c):
 # === ОТПРАВКА ТРЕКОВ ===
 def send_track(chat_id):
     cleanup_chat(chat_id, keep_rating_guide=True)
-    track_num = user_states[chat_id]["current_track"]
-    if track_num > 30:
-        finish_test(chat_id)
-        return
+    track_num = user_states[chat_id]['current_track']
+    if track_num>30: finish_test(chat_id); return
     track_filename = f"{track_num:03d}.mp3"
-    path = os.path.join(AUDIO_FOLDER, track_filename)
-    send_message(chat_id, f"🎵 Трек {track_num}/30")
-    if os.path.exists(path):
-        with open(path, "rb") as a:
-            bot.send_audio(chat_id, a, title=f"Трек {track_num:03d}")
-        kb = types.InlineKeyboardMarkup(row_width=5)
-        kb.add(*[types.InlineKeyboardButton(str(i), callback_data=f"rate_{i}") for i in range(1, 6)])
-        send_message(chat_id, "Оцените трек:", reply_markup=kb)
+    track_path = os.path.join(AUDIO_FOLDER, track_filename)
+    send_message(chat_id,f"🎵 Трек {track_num}/30")
+    if os.path.exists(track_path):
+        try:
+            with open(track_path,'rb') as audio_file:
+                audio_msg = bot.send_audio(chat_id,audio_file,title=f"Трек {track_num:03d}")
+                user_last_message.setdefault(chat_id,[]).append(audio_msg.message_id)
+                kb = types.InlineKeyboardMarkup(row_width=5)
+                buttons = [types.InlineKeyboardButton(str(i), callback_data=f"rate_{i}") for i in range(1,6)]
+                kb.add(*buttons)
+                rating_msg = bot.send_message(chat_id,"Оцените трек:",reply_markup=kb)
+                user_last_message[chat_id].append(rating_msg.message_id)
+        except Exception as e:
+            send_message(chat_id,f"❌ Ошибка: {e}")
+            user_states[chat_id]['current_track']+=1
+            send_track(chat_id)
     else:
-        user_states[chat_id]["current_track"] += 1
+        send_message(chat_id,f"⚠️ Трек {track_num:03d} не найден.")
+        user_states[chat_id]['current_track']+=1
         send_track(chat_id)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rate_"))
@@ -284,6 +291,48 @@ def reset_all(message):
         bot.send_message(ADMIN_CHAT_ID, f"✅ Рассылка выполнена ({sent_count} пользователей).")
     else:
         bot.send_message(ADMIN_CHAT_ID, "✅ Все данные очищены (без рассылки).")
+
+# === КОМАНДА /results (только для админа) ===
+@bot.message_handler(commands=['results'])
+def send_results(message):
+    chat_id = message.chat.id
+    if str(chat_id) != str(ADMIN_CHAT_ID):
+        bot.send_message(chat_id, "⛔ У вас нет доступа к этой команде.")
+        return
+
+    # 1) Попробуем скачать актуальную версию с GitHub
+    if GITHUB_TOKEN:
+        try:
+            url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{CSV_FILE}"
+            headers = {"Authorization": f"token {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
+            r = requests.get(url, headers=headers)
+            if r.status_code == 200:
+                j = r.json()
+                content_b64 = j.get("content", "")
+                content_bytes = base64.b64decode(content_b64)
+                tmp_path = "/tmp/backup_results.csv"
+                try:
+                    with open(tmp_path, "wb") as f:
+                        f.write(content_bytes)
+                    with open(tmp_path, "rb") as f:
+                        bot.send_document(chat_id, f, caption="backup_results.csv (from GitHub)")
+                    return
+                except Exception as e:
+                    print("Ошибка записи/отправки временного файла из GitHub:", e)
+            else:
+                print("GitHub /results fetch returned:", r.status_code, r.text)
+        except Exception as e:
+            print("Ошибка при попытке загрузить CSV с GitHub:", e)
+
+    # 2) fallback — отдадим локальную копию (если есть)
+    try:
+        if os.path.exists(CSV_FILE):
+            with open(CSV_FILE, 'rb') as f:
+                bot.send_document(chat_id, f, caption="backup_results.csv (local)")
+        else:
+            bot.send_message(chat_id, "❌ Файл backup_results.csv пока не создан.")
+    except Exception as e:
+        bot.send_message(chat_id, f"⚠️ Ошибка при отправке файла: {e}")
 
 # === ЗАПУСК ===
 @app.route(f'/webhook/{TOKEN}', methods=['POST'])
