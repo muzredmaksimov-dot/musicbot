@@ -225,7 +225,7 @@ async def send_track(chat_id):
             user_states[chat_id]['current_track'] += 1
             await send_track(chat_id)
     else:
-        await send_message(chat_id, f!⚠️ Трек {track_num:03d} не найден.")
+        await send_message(chat_id, f'⚠️ Трек {track_num:03d} не найден."')
         user_states[chat_id]['current_track'] += 1
         await send_track(chat_id)
 
