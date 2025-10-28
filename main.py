@@ -1,13 +1,13 @@
 import os
-import telebot
-import time
+import asyncio
+import logging
 import csv
-from telebot import types
-from flask import Flask, request
-from datetime import datetime
-import json
-import requests
 import base64
+import aiohttp
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
 
 # === НАСТРОЙКИ ===
 TOKEN = "8109304672:AAHkOQ8kzQLmHupii78YCd-1Q4HtDKWuuNk"
@@ -20,132 +20,129 @@ SUBSCRIBERS_FILE = "subscribers.txt"
 GITHUB_REPO = "muzredmaksimov-dot/testmuzicbot_results"
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")  # обязательно задать в Render Secrets
 
-bot = telebot.TeleBot(TOKEN)
-app = Flask(__name__)
+# Логирование
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# === ХРАНИЛИЩЕ ===
-user_last_message = {}
-user_rating_guide = {}
-user_rating_time = {}
-user_states = {}
+# Буфер для CSV (запись пачками)
+csv_buffer = []
+BUFFER_SIZE = 10
 
-# === ПОДСКАЗКА ПО ОЦЕНКАМ ===
+# Кэши (загружаются при старте)
+subscribers_cache = set()
+csv_header = []
+
+# Семафор: максимум 50 одновременных операций
+semaphore = asyncio.Semaphore(50)
+
+# Инициализация бота
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+
+# Подсказка по оценкам
 RATING_GUIDE_MESSAGE = """
-1️⃣  - Не нравится  
-2️⃣  - Раньше нравилась, но надоела  
-3️⃣  - Нейтрально  
-4️⃣  - Нравится  
-5️⃣  - Любимая песня
+1️⃣ — Не нравится  
+2️⃣ — Раньше нравилась, но надоела  
+3️⃣ — Нейтрально  
+4️⃣ — Нравится  
+5️⃣ — Любимая песня
 """
 
-# === УТИЛИТЫ ===
-def github_read_file(repo, path_in_repo, token):
-    """Чтение текстового файла с GitHub"""
+# Утилиты
+async def github_read_file(repo, path_in_repo, token):
+    url = f"https://api.github.com/repos/{repo}/contents/{path_in_repo}"
+    headers = {"Authorization": f!token {token}"} if token else {}
     try:
-        url = f"https://api.github.com/repos/{repo}/contents/{path_in_repo}"
-        headers = {"Accept": "application/vnd.github+json"}
-        if token:
-            headers["Authorization"] = f"token {token}"
-        r = requests.get(url, headers=headers)
-        if r.status_code == 200:
-            content_b64 = r.json().get("content", "")
-            return base64.b64decode(content_b64).decode("utf-8")
-        return ""
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    content = base64.b64decode(data["content"]).decode("utf-8")
+                    return content
     except Exception as e:
-        print("Ошибка чтения с GitHub:", e)
+        logger.error(f!GitHub READ error ({path_in_repo}): {e}")
         return ""
 
-def github_write_file(repo, path_in_repo, token, content_text, commit_message):
-    """Запись (перезапись) файла в GitHub"""
+async def github_write_file(repo, path_in_repo, token, content_text, commit_message):
+    url = f"https://api.github.com/repos/{repo}/contents/{path_in_repo}"
+    headers = {
+        "Authorization": f!token {token}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "message": commit_message,
+        "content": base64.b64encode(content_text.encode("utf-8")).decode("utf-8")
+    }
     try:
-        url = f"https://api.github.com/repos/{repo}/contents/{path_in_repo}"
-        headers = {"Accept": "application/vnd.github+json"}
-        if token:
-            headers["Authorization"] = f"token {token}"
-        r_get = requests.get(url, headers=headers)
-        b64 = base64.b64encode(content_text.encode("utf-8")).decode("utf-8")
-        payload = {"message": commit_message, "content": b64}
-        if r_get.status_code == 200:
-            payload["sha"] = r_get.json().get("sha")
-        r_put = requests.put(url, headers=headers, json=payload)
-        return r_put.status_code in (200, 201)
+        async with aiohttp.ClientSession() as session:
+            # Проверка существования файла (получаем sha)
+            async with session.get(url, headers=headers) as get_resp:
+                if get_resp.status == 200:
+                    payload["sha"] = (await get_resp.json())["sha"]
+            # Запись
+            async with session.put(url, headers=headers, json=payload) as put_resp:
+                return put_resp.status in (200, 201)
     except Exception as e:
-        print("Ошибка записи на GitHub:", e)
+        logger.error(f"GitHub WRITE error ({path_in_repo}): {e}")
         return False
 
-def github_append_line(repo, path_in_repo, token, line, header_if_missing=None):
-    """Добавление строки в текстовый файл на GitHub"""
-    existing = github_read_file(repo, path_in_repo, token)
-    if not existing:
-        if header_if_missing:
-            new_text = header_if_missing + "\n" + line + "\n"
-        else:
-            new_text = line + "\n"
-    else:
-        if not existing.endswith("\n"):
-            existing += "\n"
-        new_text = existing + line + "\n"
-    return github_write_file(repo, path_in_repo, token, new_text, f"Update {path_in_repo}")
-
-# === ОТПРАВКА ===
-def send_message(chat_id, text, reply_markup=None, parse_mode=None):
+async def flush_csv_buffer():
+    """Запись буфера в локальный CSV и на GitHub"""
+    if not csv_buffer:
+        return
     try:
-        msg = bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
-        user_last_message.setdefault(chat_id, []).append(msg.message_id)
+        # Локальная запись
+        with open(CSV_FILE, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerows(csv_buffer)
+        # GitHub-запись (пачкой)
+        csv_content = "\n".join([","join(map(str, row)) for row in csv_buffer])
+        await github_write_file(
+            GITHUB_REPO, CSV_FILE, GITHUB_TOKEN,
+            csv_content + "\n", f"Update {CSV_FILE}"
+        )
+        csv_buffer.clear()
+    except Exception as e:
+        logger.error(f"CSV flush error: {e}")
+
+
+async def send_message(chat_id, text, reply_markup=None, parse_mode=None):
+    try:
+        msg = await bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
         return msg
     except Exception as e:
-        print("Ошибка отправки сообщения:", e)
+        logger.error(f!Send message error ({chat_id}): {e}")
 
-def cleanup_chat(chat_id, keep_rating_guide=False):
-    try:
-        messages_to_keep = [user_rating_guide.get(chat_id)] if keep_rating_guide else []
-        for msg_id in user_last_message.get(chat_id, []):
-            if msg_id not in messages_to_keep and msg_id:
-                try:
-                    bot.delete_message(chat_id, msg_id)
-                except:
-                    pass
-        user_last_message[chat_id] = messages_to_keep
-    except Exception as e:
-        print("Ошибка очистки чата:", e)
-
-def send_rating_guide(chat_id):
-    if chat_id in user_rating_guide:
-        try: bot.delete_message(chat_id, user_rating_guide[chat_id])
-        except: pass
-    msg = send_message(chat_id, RATING_GUIDE_MESSAGE)
-    user_rating_guide[chat_id] = msg.message_id
-
-# === СТАРТ ===
-@bot.message_handler(commands=["start"])
-def start(message):
+# Старт и подписчики
+@dp.message(Command("start"))
+async def start(message: types.Message):
     chat_id = message.chat.id
     user = message.from_user
 
-    # Добавляем в список подписчиков (и на GitHub)
-    try:
-        subscribers_text = github_read_file(GITHUB_REPO, SUBSCRIBERS_FILE, GITHUB_TOKEN)
-        subscribers = set(s.strip() for s in subscribers_text.split("\n") if s.strip())
-        if str(chat_id) not in subscribers:
-            subscribers.add(str(chat_id))
-            new_text = "\n".join(sorted(subscribers))
-            github_write_file(GITHUB_REPO, SUBSCRIBERS_FILE, GITHUB_TOKEN, new_text, "Add new subscriber")
-    except Exception as e:
-        print("Ошибка добавления в subscribers:", e)
+    # Добавляем в подписчики (если нет в кэше)
+    if str(chat_id) not in subscribers_cache:
+        subscribers_cache.add(str(chat_id))
+        new_text = "\n".join(sorted(subscribers_cache))
+        await github_write_file(GITHUB_REPO, SUBSCRIBERS_FILE, GITHUB_TOKEN, new_text, "Add subscriber")
 
-    cleanup_chat(chat_id)
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🚀 Начать тест", callback_data="start_test"))
-    send_message(chat_id, f"Привет, {user.first_name}! 🎵\n\n"
-                          "Вы прослушаете 30 музыкальных фрагментов и оцените каждый по шкале от 1 до 5.\n\n"
-                          "🎁 После теста среди всех участников — розыгрыш Беспроводных наушников!\n\n"
-                          "_Нажимая «Начать тест», вы даёте согласие на обработку персональных данных._",
-                 reply_markup=kb, parse_mode="Markdown")
 
-@bot.callback_query_handler(func=lambda call: call.data == "start_test")
-def start_test(call):
-    chat_id = call.message.chat.id
-    user = call.from_user
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚀 Начать тест", callback_data="start_test")]
+    ])
+    await send_message(
+        chat_id,
+        f"Привет, {user.first_name}! 🎵\n\n"
+        "Вы прослушаете 30 музыкальных фрагментов и оцените каждый по шкале от 1 до 5.\n\n"
+        "🎁 После теста среди всех участников — розыгрыш подарков!\n\n"
+        "_Нажимая «Начать тест», вы даёте согласие на обработку персональных данных._",
+        reply_markup=kb, parse_mode="Markdown"
+    )
+
+@dp.callback_query(F.data == "start_test")
+async def start_test(callback: types.CallbackQuery):
+    chat_id = callback.message.chat.id
+    user = callback.from_user
+    # Инициализация состояния
     user_states[chat_id] = {
         "user_data": {
             "user_id": chat_id,
@@ -155,206 +152,271 @@ def start_test(call):
             "gender": "",
             "age": ""
         },
-        "ratings": {},
+        "ratings": {},  # { "1": 5, "2": 3, ... }
         "current_track": 1
     }
-    try: bot.delete_message(chat_id, call.message.message_id)
-    except: pass
-    ask_gender(chat_id)
+    await callback.answer()
+    await ask_gender(chat_id)
 
-# === АНКЕТА ===
-def ask_gender(chat_id):
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("Мужской", callback_data="gender_M"),
-           types.InlineKeyboardButton("Женский", callback_data="gender_F"))
-    send_message(chat_id, "Укажите ваш пол:", reply_markup=kb)
+# Анкета
+async def ask_gender(chat_id):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Мужской", callback_data="gender_M")],
+        [InlineKeyboardButton(text="Женский", callback_data="gender_F")]
+    ])
+    await send_message(chat_id, "Укажите ваш пол:", reply_markup=kb)
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("gender_"))
-def handle_gender(c):
-    chat_id = c.message.chat.id
-    gender = "Мужской" if c.data.endswith("M") else "Женский"
+@dp.callback_query(F.data.startswith("gender_"))
+async def handle_gender(callback: types.CallbackQuery):
+    chat_id = callback.message.chat.id
+    gender = "Мужской" if callback.data.endswith("M") else "Женский"
     user_states[chat_id]["user_data"]["gender"] = gender
-    try: bot.delete_message(chat_id, c.message.message_id)
-    except: pass
-    ask_age(chat_id)
+    await ask_age(chat_id)
 
-def ask_age(chat_id):
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    for o in ["до 24", "25-34", "35-44", "45-54", "55+"]:
-        kb.add(types.InlineKeyboardButton(o, callback_data=f"age_{o}"))
-    send_message(chat_id, "Укажите ваш возраст:", reply_markup=kb)
+async def ask_age(chat_id):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="до 24", callback_data="age_до 24")],
+        [InlineKeyboardButton(text="25-34", callback_data="age_25-34")],
+        [InlineKeyboardButton(text="35-44", callback_data="age_35-44")],
+        [InlineKeyboardButton(text="45+", callback_data="age_45+")]
+    ])
+    await send_message(chat_id, "Укажите ваш возраст:", reply_markup=kb)
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("age_"))
-def handle_age(c):
-    chat_id = c.message.chat.id
-    user_states[chat_id]["user_data"]["age"] = c.data.split("_", 1)[1]
-    try: bot.delete_message(chat_id, c.message.message_id)
-    except: pass
+@dp.callback_query(F.data.startswith("age_"))
+async def handle_age(callback: types.CallbackQuery):
+    chat_id = callback.message.chat.id
+    age = callback.data.split("_", 1)[1]
+    user_states[chat_id]["user_data"]["age"] = age
     username = user_states[chat_id]["user_data"].get("username") or user_states[chat_id]["user_data"]["first_name"]
-    send_message(chat_id, f"Спасибо, @{username}! 🎶\n\nТеперь начнем тест. Удачи! 🎁")
-    time.sleep(1)
-    send_rating_guide(chat_id)
-    send_track(chat_id)
 
-# === ОТПРАВКА ТРЕКОВ ===
-def send_track(chat_id):
-    cleanup_chat(chat_id, keep_rating_guide=True)
+    # Отправляем подсказку по оценкам
+    await send_message(chat_id, RATING_GUIDE_MESSAGE, parse_mode="Markdown")
+    await asyncio.sleep(1)
+    await send_message(
+        chat_id,
+        f"Спасибо, @{username}! 🎶\n\nТеперь начнём тест. Удачи! 🎁"
+    )
+    await asyncio.sleep(1)
+    await send_track(chat_id)
+
+# Отправка треков и оценки
+async def send_track(chat_id):
     track_num = user_states[chat_id]['current_track']
-    if track_num>30: finish_test(chat_id); return
+    if track_num > 30:
+        await finish_test(chat_id)
+        return
+
     track_filename = f"{track_num:03d}.mp3"
     track_path = os.path.join(AUDIO_FOLDER, track_filename)
-    send_message(chat_id,f"🎵 Трек {track_num}/30")
+
+    await send_message(chat_id, f"🎵 Трек {track_num}/30")
+
     if os.path.exists(track_path):
         try:
-            with open(track_path,'rb') as audio_file:
-                audio_msg = bot.send_audio(chat_id,audio_file,title=f"Трек {track_num:03d}")
-                user_last_message.setdefault(chat_id,[]).append(audio_msg.message_id)
-                kb = types.InlineKeyboardMarkup(row_width=5)
-                buttons = [types.InlineKeyboardButton(str(i), callback_data=f"rate_{i}") for i in range(1,6)]
-                kb.add(*buttons)
-                rating_msg = bot.send_message(chat_id,"Оцените трек:",reply_markup=kb)
-                user_last_message[chat_id].append(rating_msg.message_id)
+            with open(track_path, 'rb') as audio_file:
+                audio_msg = await bot.send_audio(chat_id, audio_file, title=f"Трек {track_num:03d}")
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=str(i), callback_data=f"rate_{i}") for i in range(1, 6)]
+            ])
+            rating_msg = await send_message(chat_id, "Оцените трек:", reply_markup=kb)
         except Exception as e:
-            send_message(chat_id,f"❌ Ошибка: {e}")
-            user_states[chat_id]['current_track']+=1
-            send_track(chat_id)
+            await send_message(chat_id, f!❌ Ошибка при отправке трека: {e}")
+            user_states[chat_id]['current_track'] += 1
+            await send_track(chat_id)
     else:
-        send_message(chat_id,f"⚠️ Трек {track_num:03d} не найден.")
-        user_states[chat_id]['current_track']+=1
-        send_track(chat_id)
+        await send_message(chat_id, f!⚠️ Трек {track_num:03d} не найден.")
+        user_states[chat_id]['current_track'] += 1
+        await send_track(chat_id)
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("rate_"))
-def rate(c):
-    chat_id = c.message.chat.id
-    r = int(c.data.split("_")[1])
+
+@dp.callback_query(F.data.startswith("rate_"))
+async def rate(callback: types.CallbackQuery):
+    chat_id = callback.message.chat.id
+    r = int(callback.data.split("_")[1])
     t = user_states[chat_id]["current_track"]
-    user_states[chat_id]["ratings"][str(t)] = r
-    user_states[chat_id]["current_track"] += 1
-    try: bot.delete_message(chat_id, c.message.message_id)
-    except: pass
-    send_track(chat_id)
 
-# === ФИНАЛ ===
-def finish_test(chat_id):
+
+    # Валидация оценки
+    if 1 <= r <= 5:
+        user_states[chat_id]["ratings"][str(t)] = r
+        user_states[chat_id]["current_track"] += 1
+        await callback.answer()
+        await send_track(chat_id)
+    else:
+        await callback.answer("Некорректная оценка!", show_alert=True)
+
+
+# Завершение теста
+async def finish_test(chat_id):
     user = user_states[chat_id]["user_data"]
     ratings = user_states[chat_id]["ratings"]
 
-    # сохраняем CSV локально
-    file_exists = os.path.exists(CSV_FILE)
-    with open(CSV_FILE, "a", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        if not file_exists:
-            headers = ["user_id", "username", "first_name", "last_name", "gender", "age"] + [f"track_{i}" for i in range(1, 31)]
-            w.writerow(headers)
-        row = [user["user_id"], user.get("username", ""), user.get("first_name", ""), user.get("last_name", ""), user["gender"], user["age"]] + [ratings.get(str(i), "") for i in range(1, 31)]
-        w.writerow(row)
+    # Формируем строку для CSV: все 30 треков
+    track_ratings = []
+    for track_num in range(1, 31):
+        track_key = str(track_num)
+        track_rating = ratings.get(track_key, "")
+        track_ratings.append(track_rating)
 
-    # добавляем на GitHub
-    with open(CSV_FILE, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-    if len(lines) >= 2:
-        github_append_line(GITHUB_REPO, CSV_FILE, GITHUB_TOKEN, lines[-1].strip(), header_if_missing=lines[0].strip())
+    row = [
+        user["user_id"],
+        user.get("username", ""),
+        user.get("first_name", ""),
+        user.get("last_name", ""),
+        user["gender"],
+        user["age"]
+    ] + track_ratings
 
-    send_message(chat_id, f"🎉 @{user.get('username') or user['first_name']}, тест завершён!\n\nСледите за новостями в @RadioMlR_Efir 🎁")
+    # Добавляем в буфер
+    csv_buffer.append(row)
 
-# === СБРОС ===
-@bot.message_handler(commands=["reset_all"])
-def reset_all(message):
-    if str(message.chat.id) != ADMIN_CHAT_ID:
-        bot.send_message(message.chat.id, "⛔ Нет доступа.")
+    # Периодическая запись буфера
+    if len(csv_buffer) >= BUFFER_SIZE:
+        await flush_csv_buffer()
+
+    await send_message(
+        chat_id,
+        f!🎉 @{user.get('username') or user['first_name']}, тест завершён!\n\n"
+        "Следите за новостями в @RadioMIR_Efir 🎁"
+    )
+
+    # Очищаем состояние
+    user_states.pop(chat_id, None)
+
+
+# Команды администратора
+@dp.message(Command("flush_buffer"))
+async def flush_buffer_command(message: types.Message):
+    chat_id = message.chat.id
+    if chat_id != ADMIN_CHAT_ID:
+        await bot.send_message(chat_id, "⛔ Нет доступа.")
+        return
+
+    if not csv_buffer:
+        await bot.send_message(chat_id, "📭 Буфер пуст. Нет данных для записи.")
+        return
+
+    try:
+        # Принудительно записываем буфер
+        await flush_csv_buffer()
+        await bot.send_message(
+            chat_id,
+            f!✅ Буфер записан успешно!\n"
+            f!Сохранено записей: {len(csv_buffer)}\n"
+            f!Файл обновлён на GitHub."
+        )
+        logger.info(f"Администратор {chat_id} принудительно записал буфер ({len(csv_buffer)} записей)")
+    except Exception as e:
+        await bot.send_message(chat_id, f!❌ Ошибка при записи буфера: {e}")
+        logger.error(f"Ошибка принудительной записи буфера: {e}")
+
+
+@dp.message(Command("reset_all"))
+async def reset_all(message: types.Message):
+    chat_id = message.chat.id
+    if chat_id != ADMIN_CHAT_ID:
+        await bot.send_message(chat_id, "⛔ Нет доступа.")
         return
 
     args = message.text.split()
     announce = len(args) > 1 and args[1].lower() in ("announce", "1", "send")
 
-    # очистка CSV
-    headers = ["user_id","username","first_name","last_name","gender","age"]+[f"track_{i}" for i in range(1,31)]
-    open(CSV_FILE, "w", encoding="utf-8").write(",".join(headers) + "\n")
-    github_write_file(GITHUB_REPO, CSV_FILE, GITHUB_TOKEN, ",".join(headers) + "\n", "Reset CSV")
+    # Принудительная запись буфера перед сбросом
+    if csv_buffer:
+        try:
+            await flush_csv_buffer()
+            logger.info(f!Записано {len(csv_buffer)} записей перед сбросом")
+        except Exception as e:
+            logger.error(f!Ошибка записи буфера перед сбросом: {e}")
 
-    # рассылка новым тестом
+    # Очистка буфера
+    csv_buffer.clear()
+
+    # Пересоздание CSV с заголовком
+    with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "user_id", "username", "first_name", "last_name", "gender", "age"
+        ] + [f"track_{i}" for i in range(1, 31)])
+
+    # Обновление файла на GitHub
+    header_row = ",".join([
+        "user_id", "username", "first_name", "last_name", "gender", "age"
+    ] + [f!track_{i}" for i in range(1, 31)]) + "\n"
+    await github_write_file(
+        GITHUB_REPO, CSV_FILE, GITHUB_TOKEN,
+        header_row, "Reset CSV"
+    )
+
     if announce:
-        subs_text = github_read_file(GITHUB_REPO, SUBSCRIBERS_FILE, GITHUB_TOKEN)
-        subs = [s.strip() for s in subs_text.split("\n") if s.strip()]
         sent_count = 0
-        for s in subs:
+        for s in subscribers_cache:
             try:
-                kb = types.InlineKeyboardMarkup()
-                kb.add(types.InlineKeyboardButton("🚀 Начать тест", callback_data="start_test"))
-                bot.send_message(int(s), "🎧 Новый музыкальный тест уже готов!\n\n"
-                                         "Пройди и оцени 30 треков — твое мнение важно для радио МИР! 🎶",
-                                 reply_markup=kb)
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🚀 Начать тест", callback_data="start_test")]
+                ])
+                await bot.send_message(
+                    int(s),
+                    "🎧 Новый музыкальный тест уже готов!\n\n"
+                    "Пройди и оцени 30 треков — твоё мнение важно для радио МИР 🎶",
+                    reply_markup=kb
+                )
                 sent_count += 1
-                time.sleep(0.1)
-            except Exception:
-                pass
-        bot.send_message(ADMIN_CHAT_ID, f"✅ Рассылка выполнена ({sent_count} пользователей).")
+                await asyncio.sleep(0.1)
+            except Exception as e:
+                logger.error(f"Ошибка отправки подписчику {s}: {e}")
+        await bot.send_message(ADMIN_CHAT_ID, f!✅ Рассылка выполнена ({sent_count} пользователей).")
     else:
-        bot.send_message(ADMIN_CHAT_ID, "✅ Все данные очищены (без рассылки).")
+        await bot.send_message(ADMIN_CHAT_ID, "✅ Все данные очищены (без рассылки).")
 
-# === КОМАНДА /results (только для админа) ===
-@bot.message_handler(commands=['results'])
-def send_results(message):
+
+@dp.message(Command("results"))
+async def send_results(message: types.Message):
     chat_id = message.chat.id
-    if str(chat_id) != str(ADMIN_CHAT_ID):
-        bot.send_message(chat_id, "⛔ У вас нет доступа к этой команде.")
+    if chat_id != ADMIN_CHAT_ID:
+        await bot.send_message(chat_id, "⛔ Нет доступа.")
         return
 
-    # 1) Попробуем скачать актуальную версию с GitHub
-    if GITHUB_TOKEN:
-        try:
-            url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{CSV_FILE}"
-            headers = {"Authorization": f"token {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
-            r = requests.get(url, headers=headers)
-            if r.status_code == 200:
-                j = r.json()
-                content_b64 = j.get("content", "")
-                content_bytes = base64.b64decode(content_b64)
-                tmp_path = "/tmp/backup_results.csv"
-                try:
-                    with open(tmp_path, "wb") as f:
-                        f.write(content_bytes)
-                    with open(tmp_path, "rb") as f:
-                        bot.send_document(chat_id, f, caption="backup_results.csv (from GitHub)")
-                    return
-                except Exception as e:
-                    print("Ошибка записи/отправки временного файла из GitHub:", e)
-            else:
-                print("GitHub /results fetch returned:", r.status_code, r.text)
-        except Exception as e:
-            print("Ошибка при попытке загрузить CSV с GitHub:", e)
-
-    # 2) fallback — отдадим локальную копию (если есть)
     try:
-        if os.path.exists(CSV_FILE):
-            with open(CSV_FILE, 'rb') as f:
-                bot.send_document(chat_id, f, caption="backup_results.csv (local)")
-        else:
-            bot.send_message(chat_id, "❌ Файл backup_results.csv пока не создан.")
+        with open(CSV_FILE, "rb") as f:
+            await bot.send_document(chat_id, f, caption="📊 Текущие результаты теста")
     except Exception as e:
-        bot.send_message(chat_id, f"⚠️ Ошибка при отправке файла: {e}")
+        await bot.send_message(chat_id, f"❌ Ошибка при отправке файла: {e}")
+        logger.error(f"Send results error: {e}")
 
-# === ЗАПУСК ===
-@app.route(f'/webhook/{TOKEN}', methods=['POST'])
-def webhook():
-    if request.headers.get('content-type')=='application/json':
-        update = telebot.types.Update.de_json(request.get_data().decode('utf-8'))
-        bot.process_new_updates([update])
-        return ''
-    return 'Bad Request',400
 
-@app.route('/')
-def index(): return 'Music Test Bot running!'
-@app.route('/health')
-def health(): return 'OK'
+# Глобальные переменные
+user_states = {}  # Хранилище состояний (в памяти)
 
-if __name__=="__main__":
-    print("🚀 Бот запущен")
-    if "RENDER" in os.environ:
-        bot.remove_webhook()
-        time.sleep(1)
-        bot.set_webhook(url=f"https://musicbot-knqj.onrender.com/webhook/{TOKEN}")
-        app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+# Запуск бота
+async def main():
+    # Загрузка кэша при старте
+    global subscribers_cache, csv_header
+
+    # Читаем подписчиков из GitHub
+    subscribers_text = await github_read_file(GITHUB_REPO, SUBSCRIBERS_FILE, GITHUB_TOKEN)
+    if subscribers_text:
+        subscribers_cache = set(s.strip() for s in subscribers_text.split("\n") if s.strip())
     else:
-        bot.remove_webhook()
-        bot.polling(none_stop=True)
+        subscribers_cache = set()
+
+    # Читаем заголовки CSV (если файл существует локально)
+    if os.path.exists(CSV_FILE):
+        try:
+            with open(CSV_FILE, "r", encoding="utf-8") as f:
+                csv_header = next(csv.reader(f))
+        except:
+            csv_header = []
+    else:
+        csv_header = [
+            "user_id", "username", "first_name", "last_name", "gender", "age"
+        ] + [f"track_{i}" for i in range(1, 31)]
+
+    # Запуск polling
+    await dp.start_polling(bot)
+
+# Точка входа
+if __name__ == "__main__":
+    asyncio.run(main())
+
+
