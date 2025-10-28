@@ -221,7 +221,7 @@ async def send_track(chat_id):
             ])
             rating_msg = await send_message(chat_id, "Оцените трек:", reply_markup=kb)
         except Exception as e:
-            await send_message(chat_id, f!❌ Ошибка при отправке трека: {e}")
+            await send_message(chat_id, f'❌ Ошибка при отправке трека: {e}"')
             user_states[chat_id]['current_track'] += 1
             await send_track(chat_id)
     else:
@@ -308,7 +308,7 @@ async def flush_buffer_command(message: types.Message):
         )
         logger.info(f"Администратор {chat_id} принудительно записал буфер ({len(csv_buffer)} записей)")
     except Exception as e:
-        await bot.send_message(chat_id, f!❌ Ошибка при записи буфера: {e}")
+        await bot.send_message(chat_id, f'❌ Ошибка при записи буфера: {e}"')
         logger.error(f"Ошибка принудительной записи буфера: {e}")
 
 
