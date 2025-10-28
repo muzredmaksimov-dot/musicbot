@@ -63,21 +63,31 @@ async def github_read_file(repo, path_in_repo, token):
         logger.error(f"GitHub READ error ({path_in_repo}): {e}")
         return ""
 
-async def github_read_file(repo, path_in_repo, token):
+async def github_write_file(repo, path_in_repo, token, content_text, commit_message):
     url = f"https://api.github.com/repos/{repo}/contents/{path_in_repo}"
-    headers = {"Authorization": f'token {token}"'} if token else {}  # Теперь закрыто!
+    headers = {
+        "Authorization": f'token {token}"',
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "message": commit_message,
+        "content": base64.b64encode(content_text.encode("utf-8")).decode("utf-8")
+    }
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    content = base64.b64decode(data["content"]).decode("utf-8")
-                    return content
+            # Проверка существования файла (получаем sha)
+            async with session.get(url, headers=headers) as get_resp:
+                if get_resp.status == 200:
+                    payload["sha"] = (await get_resp.json())["sha"]
+            # Запись
+            async with session.put(url, headers=headers, json=payload) as put_resp:
+                return put_resp.status in (200, 201)
     except Exception as e:
-        logger.error(f"GitHub READ error ({path_in_repo}): {e}")
-        return ""
+        logger.error(f"GitHub WRITE error ({path_in_repo}): {e}")
+        return False
 
 async def flush_csv_buffer():
+
     """Запись буфера в локальный CSV и на GitHub"""
     if not csv_buffer:
         return
