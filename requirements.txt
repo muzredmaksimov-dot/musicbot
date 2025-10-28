@@ -1,4 +1,3 @@
 aiogram==3.13.1
 aiohttp
 python-dotenv
-base64
