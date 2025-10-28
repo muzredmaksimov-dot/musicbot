@@ -66,7 +66,7 @@ async def github_read_file(repo, path_in_repo, token):
 async def github_write_file(repo, path_in_repo, token, content_text, commit_message):
     url = f"https://api.github.com/repos/{repo}/contents/{path_in_repo}"
     headers = {
-        "Authorization": f!token {token}",
+        "Authorization": f'token {token}",
         "Content-Type": "application/json"
     }
     payload = {
