@@ -277,7 +277,7 @@ async def finish_test(chat_id):
 
     await send_message(
         chat_id,
-        f!🎉 @{user.get('username') or user['first_name']}, тест завершён!\n\n"
+        f'🎉 @{user.get('username') or user['first_name']'}, тест завершён!\n\n"
         "Следите за новостями в @RadioMIR_Efir 🎁"
     )
 
@@ -302,9 +302,9 @@ async def flush_buffer_command(message: types.Message):
         await flush_csv_buffer()
         await bot.send_message(
             chat_id,
-            f!✅ Буфер записан успешно!\n"
-            f!Сохранено записей: {len(csv_buffer)}\n"
-            f!Файл обновлён на GitHub."
+            f'!✅ Буфер записан успешно!'\n"
+            f'!Сохранено записей: {len(csv_buffer)}'\n"
+            f'!Файл обновлён на GitHub."'
         )
         logger.info(f"Администратор {chat_id} принудительно записал буфер ({len(csv_buffer)} записей)")
     except Exception as e:
@@ -366,9 +366,9 @@ async def reset_all(message: types.Message):
                 await asyncio.sleep(0.1)
             except Exception as e:
                 logger.error(f"Ошибка отправки подписчику {s}: {e}")
-        await bot.send_message(ADMIN_CHAT_ID, f!✅ Рассылка выполнена ({sent_count} пользователей).")
+        await bot.send_message(ADMIN_CHAT_ID, f'✅ Рассылка выполнена ({sent_count} пользователей)."')
     else:
-        await bot.send_message(ADMIN_CHAT_ID, "✅ Все данные очищены (без рассылки).")
+        await bot.send_message(ADMIN_CHAT_ID, f'"✅ Все данные очищены (без рассылки)."')
 
 
 @dp.message(Command("results"))
