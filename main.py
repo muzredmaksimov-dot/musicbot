@@ -112,7 +112,7 @@ async def send_message(chat_id, text, reply_markup=None, parse_mode=None):
         msg = await bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
         return msg
     except Exception as e:
-        logger.error(f!Send message error ({chat_id}): {e}")
+        logger.error(f'Send message error ({chat_id}): {e}'")
 
 # Старт и подписчики
 @dp.message(Command("start"))
