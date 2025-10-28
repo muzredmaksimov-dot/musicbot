@@ -51,7 +51,7 @@ RATING_GUIDE_MESSAGE = """
 # Утилиты
 async def github_read_file(repo, path_in_repo, token):
     url = f"https://api.github.com/repos/{repo}/contents/{path_in_repo}"
-    headers = {"Authorization": f!token {token}"} if token else {}
+    headers = {"Authorization": f'token {token}"'} if token else {}  # Исправлено
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers) as resp:
@@ -60,7 +60,7 @@ async def github_read_file(repo, path_in_repo, token):
                     content = base64.b64decode(data["content"]).decode("utf-8")
                     return content
     except Exception as e:
-        logger.error(f!GitHub READ error ({path_in_repo}): {e}")
+        logger.error(f"GitHub READ error ({path_in_repo}): {e}")
         return ""
 
 async def github_write_file(repo, path_in_repo, token, content_text, commit_message):
