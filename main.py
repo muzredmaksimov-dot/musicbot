@@ -2,11 +2,11 @@ import os
 import telebot
 import time
 import csv
-import threading
 from telebot import types
 from flask import Flask, request
 import requests
 import base64
+import threading
 
 # === НАСТРОЙКИ ===
 TOKEN = "8109304672:AAHkOQ8kzQLmHupii78YCd-1Q4HtDKWuuNk"
@@ -14,30 +14,31 @@ ADMIN_CHAT_ID = "866964827"
 AUDIO_FOLDER = "tracks"
 CSV_FILE = "backup_results.csv"
 SUBSCRIBERS_FILE = "subscribers.txt"
-BUFFER_FILE = "buffer_results.csv"
 
+# GitHub репозиторий для хранения CSV и subscribers.txt
 GITHUB_REPO = "muzredmaksimov-dot/testmuzicbot_results"
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")  # Render Secret
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
-# === ВНУТРЕННЕЕ ХРАНИЛИЩЕ ===
+# === ХРАНИЛИЩЕ ===
 user_last_message = {}
 user_rating_guide = {}
 user_states = {}
-buffer_lines = []  # буфер результатов
+buffer_lock = threading.Lock()
+result_buffer = []  # временный буфер строк CSV
 
 # === ПОДСКАЗКА ПО ОЦЕНКАМ ===
 RATING_GUIDE_MESSAGE = """
-1️⃣  - Не нравится  
-2️⃣  - Раньше нравилась, но надоела  
-3️⃣  - Нейтрально  
-4️⃣  - Нравится  
-5️⃣  - Любимая песня
+1️⃣ - Не нравится  
+2️⃣ - Раньше нравилась, но надоела  
+3️⃣ - Нейтрально  
+4️⃣ - Нравится  
+5️⃣ - Любимая песня
 """
 
-# === УТИЛИТЫ GITHUB ===
+# === УТИЛИТЫ ===
 def github_read_file(repo, path_in_repo, token):
     try:
         url = f"https://api.github.com/repos/{repo}/contents/{path_in_repo}"
@@ -73,24 +74,21 @@ def github_write_file(repo, path_in_repo, token, content_text, commit_message):
 def github_append_line(repo, path_in_repo, token, line, header_if_missing=None):
     existing = github_read_file(repo, path_in_repo, token)
     if not existing:
-        if header_if_missing:
-            new_text = header_if_missing + "\n" + line + "\n"
-        else:
-            new_text = line + "\n"
+        new_text = (header_if_missing + "\n" if header_if_missing else "") + line + "\n"
     else:
         if not existing.endswith("\n"):
             existing += "\n"
         new_text = existing + line + "\n"
     return github_write_file(repo, path_in_repo, token, new_text, f"Update {path_in_repo}")
 
-# === ВСПОМОГАТЕЛЬНЫЕ ===
+# === СООБЩЕНИЯ ===
 def send_message(chat_id, text, reply_markup=None, parse_mode=None):
     try:
         msg = bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
         user_last_message.setdefault(chat_id, []).append(msg.message_id)
         return msg
     except Exception as e:
-        print("Ошибка отправки сообщения:", e)
+        print("Ошибка отправки:", e)
 
 def cleanup_chat(chat_id, keep_rating_guide=False):
     try:
@@ -103,7 +101,7 @@ def cleanup_chat(chat_id, keep_rating_guide=False):
                     pass
         user_last_message[chat_id] = messages_to_keep
     except Exception as e:
-        print("Ошибка очистки чата:", e)
+        print("Ошибка очистки:", e)
 
 def send_rating_guide(chat_id):
     if chat_id in user_rating_guide:
@@ -120,30 +118,28 @@ def start(message):
     chat_id = message.chat.id
     user = message.from_user
 
-    # Добавление в список подписчиков
     try:
         subscribers_text = github_read_file(GITHUB_REPO, SUBSCRIBERS_FILE, GITHUB_TOKEN)
         subscribers = set(s.strip() for s in subscribers_text.split("\n") if s.strip())
         if str(chat_id) not in subscribers:
             subscribers.add(str(chat_id))
-            new_text = "\n".join(sorted(subscribers))
-            github_write_file(GITHUB_REPO, SUBSCRIBERS_FILE, GITHUB_TOKEN, new_text, "Add new subscriber")
+            github_write_file(GITHUB_REPO, SUBSCRIBERS_FILE, GITHUB_TOKEN, "\n".join(sorted(subscribers)), "Add new subscriber")
     except Exception as e:
-        print("Ошибка добавления в subscribers:", e)
+        print("Ошибка subscribers:", e)
 
     cleanup_chat(chat_id)
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🚀 Начать тест", callback_data="start_test"))
     send_message(chat_id, f"Привет, {user.first_name}! 🎵\n\n"
                           "Вы прослушаете 30 музыкальных фрагментов и оцените каждый по шкале от 1 до 5.\n\n"
-                          "🎁 После теста среди всех участников — розыгрыш беспроводных наушников!\n\n"
+                          "🎁 После теста среди всех участников — розыгрыш подарков!\n\n"
                           "_Нажимая «Начать тест», вы даёте согласие на обработку персональных данных._",
                  reply_markup=kb, parse_mode="Markdown")
 
-@bot.callback_query_handler(func=lambda call: call.data == "start_test")
-def start_test(call):
-    chat_id = call.message.chat.id
-    user = call.from_user
+@bot.callback_query_handler(func=lambda c: c.data == "start_test")
+def start_test(c):
+    chat_id = c.message.chat.id
+    user = c.from_user
     user_states[chat_id] = {
         "user_data": {
             "user_id": chat_id,
@@ -157,7 +153,7 @@ def start_test(call):
         "current_track": 1
     }
     try:
-        bot.delete_message(chat_id, call.message.message_id)
+        bot.delete_message(chat_id, c.message.message_id)
     except:
         pass
     ask_gender(chat_id)
@@ -200,22 +196,23 @@ def handle_age(c):
     send_rating_guide(chat_id)
     send_track(chat_id)
 
-# === ОТПРАВКА ТРЕКОВ ===
+# === ТРЕКИ ===
 def send_track(chat_id):
     cleanup_chat(chat_id, keep_rating_guide=True)
     track_num = user_states[chat_id]["current_track"]
     if track_num > 30:
         finish_test(chat_id)
         return
-    track_filename = f"{track_num:03d}.mp3"
-    path = os.path.join(AUDIO_FOLDER, track_filename)
+    path = os.path.join(AUDIO_FOLDER, f"{track_num:03d}.mp3")
     send_message(chat_id, f"🎵 Трек {track_num}/30")
     if os.path.exists(path):
-        with open(path, "rb") as a:
-            bot.send_audio(chat_id, a, title=f"Трек {track_num:03d}")
+        with open(path, "rb") as f:
+            audio = bot.send_audio(chat_id, f, title=f"Трек {track_num:03d}")
+            user_last_message.setdefault(chat_id, []).append(audio.message_id)
         kb = types.InlineKeyboardMarkup(row_width=5)
         kb.add(*[types.InlineKeyboardButton(str(i), callback_data=f"rate_{i}") for i in range(1, 6)])
-        send_message(chat_id, "Оцените трек:", reply_markup=kb)
+        msg = send_message(chat_id, "Оцените трек:", reply_markup=kb)
+        user_last_message[chat_id].append(msg.message_id)
     else:
         user_states[chat_id]["current_track"] += 1
         send_track(chat_id)
@@ -237,80 +234,101 @@ def rate(c):
 def finish_test(chat_id):
     user = user_states[chat_id]["user_data"]
     ratings = user_states[chat_id]["ratings"]
-    row = [user["user_id"], user.get("username", ""), user.get("first_name", ""),
-           user.get("last_name", ""), user["gender"], user["age"]] + \
-          [ratings.get(str(i), "") for i in range(1, 31)]
-    buffer_lines.append(row)
-    bot.send_message(ADMIN_CHAT_ID, f"📥 Новый завершённый тест: {user.get('first_name')} ({user['age']}, {user['gender']})")
+    row = [user["user_id"], user.get("username", ""), user.get("first_name", ""), user.get("last_name", ""),
+           user["gender"], user["age"]] + [ratings.get(str(i), "") for i in range(1, 31)]
+
+    with buffer_lock:
+        result_buffer.append(row)
+
+    bot.send_message(ADMIN_CHAT_ID, f"✅ Пользователь {user.get('username') or user['first_name']} завершил тест.")
     send_message(chat_id, f"🎉 @{user.get('username') or user['first_name']}, тест завершён!\n\nСледите за новостями в @RadioMIR_Efir 🎁")
 
-# === ПЕРИОДИЧНЫЙ ПУШ ===
-def flush_buffer_periodically():
-    while True:
-        time.sleep(60)  # каждые 1 минуту
-        if buffer_lines:
-            try:
-                file_exists = os.path.exists(CSV_FILE)
-                with open(CSV_FILE, "a", newline="", encoding="utf-8") as f:
-                    w = csv.writer(f)
-                    if not file_exists:
-                        headers = ["user_id", "username", "first_name", "last_name", "gender", "age"] + [f"track_{i}" for i in range(1, 31)]
-                        w.writerow(headers)
-                    for row in buffer_lines:
-                        w.writerow(row)
-                with open(CSV_FILE, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
-                if len(lines) >= 2:
-                    github_append_line(GITHUB_REPO, CSV_FILE, GITHUB_TOKEN, lines[-1].strip(), header_if_missing=lines[0].strip())
-                buffer_lines.clear()
-                print("✅ Буфер успешно выгружен на GitHub.")
-            except Exception as e:
-                print("⚠️ Ошибка авто-пуша:", e)
+# === СБРОС И FLUSH ===
+def push_buffer_to_github():
+    with buffer_lock:
+        if not result_buffer:
+            return
+        file_exists = os.path.exists(CSV_FILE)
+        with open(CSV_FILE, "a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if not file_exists:
+                headers = ["user_id", "username", "first_name", "last_name", "gender", "age"] + [f"track_{i}" for i in range(1, 31)]
+                w.writerow(headers)
+            for row in result_buffer:
+                w.writerow(row)
+        with open(CSV_FILE, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        github_write_file(GITHUB_REPO, CSV_FILE, GITHUB_TOKEN, "".join(lines), "Buffer flush to GitHub")
+        result_buffer.clear()
 
-# === /results ===
-@bot.message_handler(commands=['results'])
-def send_results(message):
-    chat_id = message.chat.id
-    if str(chat_id) != ADMIN_CHAT_ID:
-        bot.send_message(chat_id, "⛔ Нет доступа.")
+@bot.message_handler(commands=["flush"])
+def flush_command(message):
+    if str(message.chat.id) != ADMIN_CHAT_ID:
+        bot.send_message(message.chat.id, "⛔ Нет доступа.")
         return
-    try:
-        with open(CSV_FILE, "rb") as f:
-            bot.send_document(chat_id, f, caption="📊 Актуальные результаты (CSV)")
-    except Exception as e:
-        bot.send_message(chat_id, f"⚠️ Ошибка при отправке файла: {e}")
+    push_buffer_to_github()
+    bot.send_message(ADMIN_CHAT_ID, "💾 Буфер успешно отправлен на GitHub.")
 
-# === СБРОС ===
+def auto_flush():
+    while True:
+        time.sleep(120)
+        push_buffer_to_github()
+
+threading.Thread(target=auto_flush, daemon=True).start()
+
 @bot.message_handler(commands=["reset_all"])
 def reset_all(message):
     if str(message.chat.id) != ADMIN_CHAT_ID:
         bot.send_message(message.chat.id, "⛔ Нет доступа.")
         return
-    args = message.text.split()
-    announce = len(args) > 1 and args[1].lower() in ("announce", "1", "send")
 
-    headers = ["user_id", "username", "first_name", "last_name", "gender", "age"] + [f"track_{i}" for i in range(1, 31)]
-    open(CSV_FILE, "w", encoding="utf-8").write(",".join(headers) + "\n")
+    push_buffer_to_github()
+    headers = ["user_id","username","first_name","last_name","gender","age"]+[f"track_{i}" for i in range(1,31)]
     github_write_file(GITHUB_REPO, CSV_FILE, GITHUB_TOKEN, ",".join(headers) + "\n", "Reset CSV")
 
-    if announce:
-        subs_text = github_read_file(GITHUB_REPO, SUBSCRIBERS_FILE, GITHUB_TOKEN)
-        subs = [s.strip() for s in subs_text.split("\n") if s.strip()]
-        sent = 0
-        for s in subs:
-            try:
-                kb = types.InlineKeyboardMarkup()
-                kb.add(types.InlineKeyboardButton("🚀 Начать тест", callback_data="start_test"))
-                bot.send_message(int(s), "🎧 Новый музыкальный тест уже готов!\n\n"
-                                         "Пройди и оцени 30 треков — твое мнение важно для радио МИР 🎶",
-                                 reply_markup=kb)
-                sent += 1
-                time.sleep(0.1)
-            except:
-                pass
-        bot.send_message(ADMIN_CHAT_ID, f"✅ Рассылка выполнена ({sent} пользователей).")
-    else:
-        bot.send_message(ADMIN_CHAT_ID, "✅ Все данные очищены (без рассылки).")
+    bot.send_message(ADMIN_CHAT_ID, "✅ Все данные очищены и буфер сохранён.")
+
+ # === КОМАНДА /results (только для админа) ===
+@bot.message_handler(commands=['results'])
+def send_results(message):
+    chat_id = message.chat.id
+    if str(chat_id) != str(ADMIN_CHAT_ID):
+        bot.send_message(chat_id, "⛔ У вас нет доступа к этой команде.")
+        return
+
+    # 1) Попробуем скачать актуальную версию с GitHub
+    if GITHUB_TOKEN:
+        try:
+            url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{CSV_FILE}"
+            headers = {"Authorization": f"token {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
+            r = requests.get(url, headers=headers)
+            if r.status_code == 200:
+                j = r.json()
+                content_b64 = j.get("content", "")
+                content_bytes = base64.b64decode(content_b64)
+                tmp_path = "/tmp/backup_results.csv"
+                try:
+                    with open(tmp_path, "wb") as f:
+                        f.write(content_bytes)
+                    with open(tmp_path, "rb") as f:
+                        bot.send_document(chat_id, f, caption="backup_results.csv (from GitHub)")
+                    return
+                except Exception as e:
+                    print("Ошибка записи/отправки временного файла из GitHub:", e)
+            else:
+                print("GitHub /results fetch returned:", r.status_code, r.text)
+        except Exception as e:
+            print("Ошибка при попытке загрузить CSV с GitHub:", e)
+
+    # 2) fallback — отдадим локальную копию (если есть)
+    try:
+        if os.path.exists(CSV_FILE):
+            with open(CSV_FILE, 'rb') as f:
+                bot.send_document(chat_id, f, caption="backup_results.csv (local)")
+        else:
+            bot.send_message(chat_id, "❌ Файл backup_results.csv пока не создан.")
+    except Exception as e:
+        bot.send_message(chat_id, f"⚠️ Ошибка при отправке файла: {e}")
 
 # === ЗАПУСК ===
 @app.route(f'/webhook/{TOKEN}', methods=['POST'])
@@ -323,13 +341,11 @@ def webhook():
 
 @app.route('/')
 def index(): return 'Music Test Bot running!'
-
 @app.route('/health')
 def health(): return 'OK'
 
 if __name__ == "__main__":
-    threading.Thread(target=flush_buffer_periodically, daemon=True).start()
-    print("🚀 Бот запущен (авто-пуш каждые 2 минуты)")
+    print("🚀 Бот запущен")
     if "RENDER" in os.environ:
         bot.remove_webhook()
         time.sleep(1)
