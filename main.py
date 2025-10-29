@@ -243,6 +243,38 @@ def finish_test(chat_id):
     bot.send_message(ADMIN_CHAT_ID, f"✅ Пользователь {user.get('username') or user['first_name']} завершил тест.")
     send_message(chat_id, f"🎉 @{user.get('username') or user['first_name']}, тест завершён!\n\nСледите за новостями в @RadioMIR_Efir 🎁")
 
+# === СБРОС ===
+@bot.message_handler(commands=["reset_all"])
+def reset_all(message):
+    if str(message.chat.id) != ADMIN_CHAT_ID:
+        bot.send_message(message.chat.id, "⛔ Нет доступа.")
+        return
+    args = message.text.split()
+    announce = len(args) > 1 and args[1].lower() in ("announce", "1", "send")
+
+    headers = ["user_id", "username", "first_name", "last_name", "gender", "age"] + [f"track_{i}" for i in range(1, 31)]
+    open(CSV_FILE, "w", encoding="utf-8").write(",".join(headers) + "\n")
+    github_write_file(GITHUB_REPO, CSV_FILE, GITHUB_TOKEN, ",".join(headers) + "\n", "Reset CSV")
+
+    if announce:
+        subs_text = github_read_file(GITHUB_REPO, SUBSCRIBERS_FILE, GITHUB_TOKEN)
+        subs = [s.strip() for s in subs_text.split("\n") if s.strip()]
+        sent = 0
+        for s in subs:
+            try:
+                kb = types.InlineKeyboardMarkup()
+                kb.add(types.InlineKeyboardButton("🚀 Начать тест", callback_data="start_test"))
+                bot.send_message(int(s), "🎧 Новый музыкальный тест уже готов!\n\n"
+                                         "Пройди и оцени 30 треков — твое мнение важно для радио МИР 🎶",
+                                 reply_markup=kb)
+                sent += 1
+                time.sleep(0.1)
+            except:
+                pass
+        bot.send_message(ADMIN_CHAT_ID, f"✅ Рассылка выполнена ({sent} пользователей).")
+    else:
+        bot.send_message(ADMIN_CHAT_ID, "✅ Все данные очищены (без рассылки).")
+
 # === СБРОС И FLUSH ===
 def push_buffer_to_github():
     with buffer_lock:
@@ -275,18 +307,6 @@ def auto_flush():
         push_buffer_to_github()
 
 threading.Thread(target=auto_flush, daemon=True).start()
-
-@bot.message_handler(commands=["reset_all"])
-def reset_all(message):
-    if str(message.chat.id) != ADMIN_CHAT_ID:
-        bot.send_message(message.chat.id, "⛔ Нет доступа.")
-        return
-
-    push_buffer_to_github()
-    headers = ["user_id","username","first_name","last_name","gender","age"]+[f"track_{i}" for i in range(1,31)]
-    github_write_file(GITHUB_REPO, CSV_FILE, GITHUB_TOKEN, ",".join(headers) + "\n", "Reset CSV")
-
-    bot.send_message(ADMIN_CHAT_ID, "✅ Все данные очищены и буфер сохранён.")
 
  # === КОМАНДА /results (только для админа) ===
 @bot.message_handler(commands=['results'])
