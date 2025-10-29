@@ -288,6 +288,48 @@ def reset_all(message):
 
     bot.send_message(ADMIN_CHAT_ID, "✅ Все данные очищены и буфер сохранён.")
 
+# === КОМАНДА /results (только для админа) ===
+@bot.message_handler(commands=['results'])
+def send_results(message):
+    chat_id = message.chat.id
+    if str(chat_id) != str(ADMIN_CHAT_ID):
+        bot.send_message(chat_id, "⛔ У вас нет доступа к этой команде.")
+        return
+
+    # 1) Попробуем скачать актуальную версию с GitHub
+    if GITHUB_TOKEN:
+        try:
+            url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{CSV_FILE}"
+            headers = {"Authorization": f"token {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
+            r = requests.get(url, headers=headers)
+            if r.status_code == 200:
+                j = r.json()
+                content_b64 = j.get("content", "")
+                content_bytes = base64.b64decode(content_b64)
+                tmp_path = "/tmp/backup_results.csv"
+                try:
+                    with open(tmp_path, "wb") as f:
+                        f.write(content_bytes)
+                    with open(tmp_path, "rb") as f:
+                        bot.send_document(chat_id, f, caption="backup_results.csv (from GitHub)")
+                    return
+                except Exception as e:
+                    print("Ошибка записи/отправки временного файла из GitHub:", e)
+            else:
+                print("GitHub /results fetch returned:", r.status_code, r.text)
+        except Exception as e:
+            print("Ошибка при попытке загрузить CSV с GitHub:", e)
+
+    # 2) fallback — отдадим локальную копию (если есть)
+    try:
+        if os.path.exists(CSV_FILE):
+            with open(CSV_FILE, 'rb') as f:
+                bot.send_document(chat_id, f, caption="backup_results.csv (local)")
+        else:
+            bot.send_message(chat_id, "❌ Файл backup_results.csv пока не создан.")
+    except Exception as e:
+        bot.send_message(chat_id, f"⚠️ Ошибка при отправке файла: {e}")
+
 # === ЗАПУСК ===
 @app.route(f'/webhook/{TOKEN}', methods=['POST'])
 def webhook():
