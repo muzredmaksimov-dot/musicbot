@@ -9,7 +9,7 @@ import base64
 import threading
 
 # === НАСТРОЙКИ ===
-TOKEN = "8109304672:AAHkOQ8kzQLmHupii78YCd-1Q4HtDKWuuNk"
+TOKEN = "8109304672:AAFoTtI40z5QWSsS43tRkndjqUhT76vjMFE"
 ADMIN_CHAT_ID = "866964827"
 AUDIO_FOLDER = "tracks"
 CSV_FILE = "backup_results.csv"
