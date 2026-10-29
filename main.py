@@ -9,7 +9,9 @@ import base64
 import threading
 
 # === НАСТРОЙКИ ===
-TOKEN = "8059607213:AAHtmpMelFNEgBKJDwy6SV0wQSt9EzHwg3o"
+TOKEN = os.environ.get("TOKEN")
+if not TOKEN:
+    raise RuntimeError("TOKEN environment variable is required")
 ADMIN_CHAT_ID = "866964827"
 AUDIO_FOLDER = "tracks"
 CSV_FILE = "backup_results.csv"
