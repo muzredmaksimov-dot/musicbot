@@ -234,24 +234,22 @@ def begin_music_test(chat_id):
 @bot.message_handler(
     func=lambda message: (
         message.chat.id in user_states
-        and user_states[message.chat.id].get("awaiting_phone", False)
+        and user_states[message.chat.id].get(«awaiting_phone», False)
     ),
-    content_types=["text"]
+    content_types=[«text»]
 )
 def handle_phone(message):
     chat_id = message.chat.id
     phone = message.text.strip()
+    if not phone:
+    send_message(
+        chat_id,
+        "Введите номер телефона или нажмите «Пропустить»."
+    )
+    return
 
-    if not re.fullmatch(r"\+[1-9]\d{7,14}", phone):
-        send_message(
-            chat_id,
-            "Пожалуйста, введите номер в международном формате, "
-            "например +375291234567, или нажмите «Пропустить»."
-        )
-        return
-
-    user_states[chat_id]["user_data"]["phone"] = phone
-    begin_music_test(chat_id)
+user_states[chat_id]["user_data"]["phone"] = phone
+begin_music_test(chat_id)
 
 @bot.callback_query_handler(func=lambda c: c.data == "skip_phone")
 def skip_phone(c):
