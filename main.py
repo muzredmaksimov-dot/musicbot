@@ -234,7 +234,7 @@ def begin_music_test(chat_id):
 @bot.message_handler(
     func=lambda message: (
         message.chat.id in user_states
-        and user_states[message.chat.id].get(«awaiting_phone», False)
+        and user_states[message.chat.id].get("awaiting_phone", False)
     ),
     content_types=[«text»]
 )
