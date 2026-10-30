@@ -1,4 +1,5 @@
 import os
+import re
 import telebot
 import time
 import csv
@@ -112,7 +113,8 @@ def send_rating_guide(chat_id):
         except:
             pass
     msg = send_message(chat_id, RATING_GUIDE_MESSAGE)
-    user_rating_guide[chat_id] = msg.message_id
+    if msg:
+        user_rating_guide[chat_id] = msg.message_id
 
 # === СТАРТ ===
 @bot.message_handler(commands=["start"])
@@ -149,15 +151,18 @@ def start_test(c):
             "first_name": user.first_name,
             "last_name": user.last_name,
             "gender": "",
-            "age": ""
+            "age": "",
+            "phone": ""
         },
         "ratings": {},
-        "current_track": 1
+        "current_track": 1,
+        "awaiting_phone": False
     }
     try:
         bot.delete_message(chat_id, c.message.message_id)
     except:
         pass
+    bot.answer_callback_query(c.id)
     ask_gender(chat_id)
 
 # === АНКЕТА ===
@@ -170,12 +175,16 @@ def ask_gender(chat_id):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("gender_"))
 def handle_gender(c):
     chat_id = c.message.chat.id
+    if chat_id not in user_states:
+        bot.answer_callback_query(c.id, "Сначала нажмите /start.")
+        return
     gender = "Мужской" if c.data.endswith("M") else "Женский"
     user_states[chat_id]["user_data"]["gender"] = gender
     try:
         bot.delete_message(chat_id, c.message.message_id)
     except:
         pass
+    bot.answer_callback_query(c.id)
     ask_age(chat_id)
 
 def ask_age(chat_id):
@@ -187,16 +196,77 @@ def ask_age(chat_id):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("age_"))
 def handle_age(c):
     chat_id = c.message.chat.id
+    if chat_id not in user_states:
+        bot.answer_callback_query(c.id, "Сначала нажмите /start.")
+        return
     user_states[chat_id]["user_data"]["age"] = c.data.split("_", 1)[1]
     try:
         bot.delete_message(chat_id, c.message.message_id)
     except:
         pass
+    bot.answer_callback_query(c.id)
+    ask_phone(chat_id)
+
+# === ТЕЛЕФОН ДЛЯ РОЗЫГРЫША ===
+def ask_phone(chat_id):
+    user_states[chat_id]["awaiting_phone"] = True
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("Пропустить", callback_data="skip_phone"))
+    send_message(
+        chat_id,
+        "🎁 Участвуйте в розыгрыше призов!\n\n"
+        "Оставьте номер телефона, чтобы мы могли связаться с вами в случае победы.\n\n"
+        "Введите номер в международном формате, например:\n"
+        "+375291234567\n\n"
+        "Номер будет использоваться только для связи по итогам розыгрыша. "
+        "Вы можете пропустить этот шаг.",
+        reply_markup=kb
+    )
+
+def begin_music_test(chat_id):
+    user_states[chat_id]["awaiting_phone"] = False
     username = user_states[chat_id]["user_data"].get("username") or user_states[chat_id]["user_data"]["first_name"]
-    send_message(chat_id, f"Спасибо, @{username}! 🎶\n\nТеперь начнем тест. Удачи! 🎁")
+    send_message(chat_id, f"Спасибо, {username}! 🎶\n\nТеперь начнем тест. Удачи! 🎁")
     time.sleep(1)
     send_rating_guide(chat_id)
     send_track(chat_id)
+
+@bot.message_handler(
+    func=lambda message: (
+        message.chat.id in user_states
+        and user_states[message.chat.id].get("awaiting_phone", False)
+    ),
+    content_types=["text"]
+)
+def handle_phone(message):
+    chat_id = message.chat.id
+    phone = message.text.strip()
+
+    if not re.fullmatch(r"\+[1-9]\d{7,14}", phone):
+        send_message(
+            chat_id,
+            "Пожалуйста, введите номер в международном формате, "
+            "например +375291234567, или нажмите «Пропустить»."
+        )
+        return
+
+    user_states[chat_id]["user_data"]["phone"] = phone
+    begin_music_test(chat_id)
+
+@bot.callback_query_handler(func=lambda c: c.data == "skip_phone")
+def skip_phone(c):
+    chat_id = c.message.chat.id
+    if chat_id not in user_states:
+        bot.answer_callback_query(c.id, "Начните заново командой /start.")
+        return
+    user_states[chat_id]["user_data"]["phone"] = ""
+    user_states[chat_id]["awaiting_phone"] = False
+    try:
+        bot.delete_message(chat_id, c.message.message_id)
+    except:
+        pass
+    bot.answer_callback_query(c.id)
+    begin_music_test(chat_id)
 
 # === ТРЕКИ ===
 def send_track(chat_id):
@@ -214,7 +284,8 @@ def send_track(chat_id):
         kb = types.InlineKeyboardMarkup(row_width=5)
         kb.add(*[types.InlineKeyboardButton(str(i), callback_data=f"rate_{i}") for i in range(1, 6)])
         msg = send_message(chat_id, "Оцените трек:", reply_markup=kb)
-        user_last_message[chat_id].append(msg.message_id)
+        if msg:
+            user_last_message[chat_id].append(msg.message_id)
     else:
         user_states[chat_id]["current_track"] += 1
         send_track(chat_id)
@@ -222,6 +293,9 @@ def send_track(chat_id):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rate_"))
 def rate(c):
     chat_id = c.message.chat.id
+    if chat_id not in user_states:
+        bot.answer_callback_query(c.id, "Тест не найден. Нажмите /start.")
+        return
     r = int(c.data.split("_")[1])
     t = user_states[chat_id]["current_track"]
     user_states[chat_id]["ratings"][str(t)] = r
@@ -230,6 +304,7 @@ def rate(c):
         bot.delete_message(chat_id, c.message.message_id)
     except:
         pass
+    bot.answer_callback_query(c.id)
     send_track(chat_id)
 
 # === ФИНАЛ ===
@@ -237,7 +312,7 @@ def finish_test(chat_id):
     user = user_states[chat_id]["user_data"]
     ratings = user_states[chat_id]["ratings"]
     row = [user["user_id"], user.get("username", ""), user.get("first_name", ""), user.get("last_name", ""),
-           user["gender"], user["age"]] + [ratings.get(str(i), "") for i in range(1, 31)]
+           user["gender"], user["age"], user.get("phone", "")] + [ratings.get(str(i), "") for i in range(1, 31)]
 
     with buffer_lock:
         result_buffer.append(row)
@@ -254,7 +329,7 @@ def reset_all(message):
     args = message.text.split()
     announce = len(args) > 1 and args[1].lower() in ("announce", "1", "send")
 
-    headers = ["user_id", "username", "first_name", "last_name", "gender", "age"] + [f"track_{i}" for i in range(1, 31)]
+    headers = ["user_id", "username", "first_name", "last_name", "gender", "age", "phone"] + [f"track_{i}" for i in range(1, 31)]
     open(CSV_FILE, "w", encoding="utf-8").write(",".join(headers) + "\n")
     github_write_file(GITHUB_REPO, CSV_FILE, GITHUB_TOKEN, ",".join(headers) + "\n", "Reset CSV")
 
@@ -286,7 +361,7 @@ def push_buffer_to_github():
         with open(CSV_FILE, "a", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             if not file_exists:
-                headers = ["user_id", "username", "first_name", "last_name", "gender", "age"] + [f"track_{i}" for i in range(1, 31)]
+                headers = ["user_id", "username", "first_name", "last_name", "gender", "age", "phone"] + [f"track_{i}" for i in range(1, 31)]
                 w.writerow(headers)
             for row in result_buffer:
                 w.writerow(row)
