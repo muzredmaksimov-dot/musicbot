@@ -3,6 +3,7 @@ import re
 import telebot
 import time
 import csv
+import io
 from telebot import types
 from flask import Flask, request
 import requests
@@ -354,66 +355,84 @@ def reset_all(message):
         bot.send_message(ADMIN_CHAT_ID, "✅ Все данные очищены (без рассылки).")
 
 # === СБРОС И FLUSH ===
-def push_buffer_to_github(): 
-with buffer_lock: 
-if not result_buffer: return True
-    if not GITHUB_TOKEN:
-        print("Ошибка сохранения: GITHUB_TOKEN не настроен.")
-        return False
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{CSV_FILE}"
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"token {GITHUB_TOKEN}"
-    }
-    try:
-        response = requests.get(url, headers=headers, timeout=20)
-        if response.status_code == 200:
-            content_b64 = response.json().get("content", "")
-            existing_text = base64.b64decode(content_b64).decode("utf-8")
-        elif response.status_code == 404:
-            existing_text = ""
-        else:
-            print("Не удалось прочитать CSV с GitHub:", response.status_code)
+def push_buffer_to_github():
+    with buffer_lock:
+        if not result_buffer:
+            return True
+
+        if not GITHUB_TOKEN:
+            print("Ошибка сохранения: GITHUB_TOKEN не настроен.")
             return False
-        headers_row = ["user_id", "username", "first_name", "last_name", "gender", "age", "phone"] + [
-            f"track_{i}" for i in range(1, 31)
-        ]
-        output = io.StringIO(newline="")
-        writer = csv.writer(output)
-        if not existing_text.strip():
-            writer.writerow(headers_row)
-        writer.writerows(result_buffer)
-        new_text = output.getvalue()
-        if existing_text.strip():
-            if not existing_text.endswith("\n"):
-                existing_text += "\n"
-            new_text = existing_text + new_text
-        saved = github_write_file(
-            GITHUB_REPO,
-            CSV_FILE,
-            GITHUB_TOKEN,
-            new_text,
-            "Append new test results"
-        )
-        if not saved:
-            print("Ошибка сохранения. Буфер оставлен.")
+
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{CSV_FILE}"
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"token {GITHUB_TOKEN}"
+        }
+
+        try:
+            response = requests.get(url, headers=headers, timeout=20)
+
+            if response.status_code == 200:
+                content_b64 = response.json().get("content", "")
+                existing_text = base64.b64decode(content_b64).decode("utf-8")
+            elif response.status_code == 404:
+                existing_text = ""
+            else:
+                print("Не удалось прочитать CSV с GitHub:", response.status_code)
+                return False
+
+            headers_row = [
+                "user_id", "username", "first_name", "last_name",
+                "gender", "age", "phone"
+            ] + [f"track_{i}" for i in range(1, 31)]
+
+            output = io.StringIO(newline="")
+            writer = csv.writer(output)
+
+            if not existing_text.strip():
+                writer.writerow(headers_row)
+
+            writer.writerows(result_buffer)
+            new_text = output.getvalue()
+
+            if existing_text.strip():
+                if not existing_text.endswith("\n"):
+                    existing_text += "\n"
+                new_text = existing_text + new_text
+
+            saved = github_write_file(
+                GITHUB_REPO,
+                CSV_FILE,
+                GITHUB_TOKEN,
+                new_text,
+                "Append new test results"
+            )
+
+            if not saved:
+                print("Ошибка сохранения. Буфер оставлен.")
+                return False
+
+            with open(CSV_FILE, "w", encoding="utf-8", newline="") as f:
+                f.write(new_text)
+
+            result_buffer.clear()
+            print("Результаты успешно сохранены на GitHub.")
+            return True
+
+        except Exception as e:
+            print("Ошибка отправки результатов на GitHub:", e)
             return False
-        with open(CSV_FILE, "w", encoding="utf-8", newline="") as f:
-            f.write(new_text)
-        result_buffer.clear()
-        print("Результаты успешно сохранены на GitHub.")
-        return True
-    except Exception as e:
-        print("Ошибка отправки результатов на GitHub:", e)
-        return False
 
 @bot.message_handler(commands=["flush"])
 def flush_command(message):
     if str(message.chat.id) != ADMIN_CHAT_ID:
         bot.send_message(message.chat.id, "⛔ Нет доступа.")
         return
-    push_buffer_to_github()
-    bot.send_message(ADMIN_CHAT_ID, "💾 Буфер успешно отправлен на GitHub.")
+    if push_buffer_to_github():
+        bot.send_message(ADMIN_CHAT_ID, "💾 Буфер успешно отправлен на GitHub.")
+    else:
+        bot.send_message(ADMIN_CHAT_ID, "⚠️ Не удалось сохранить данные. Буфер сохранён для повторной попытки.")
 
 def auto_flush():
     while True:
