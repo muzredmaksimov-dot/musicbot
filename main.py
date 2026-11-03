@@ -88,7 +88,7 @@ def github_headers():
     }
 
     if GITHUB_TOKEN:
-        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+        headers["Authorization"] = f"token {GITHUB_TOKEN}"
 
     return headers
 
