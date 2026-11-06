@@ -134,11 +134,17 @@ def start(message):
     cleanup_chat(chat_id)
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🚀 Начать тест", callback_data="start_test"))
-    send_message(chat_id, f"Привет, {user.first_name}! 🎵\n\n"
-                          "Вы прослушаете 30 музыкальных фрагментов и оцените каждый по шкале от 1 до 5.\n\n"
-                          "🎁 После теста среди всех участников — розыгрыш беспроводных нушников!\n\n"
-                          "_Нажимая «Начать тест», вы даёте согласие на обработку персональных данных._",
-                 reply_markup=kb, parse_mode="Markdown")
+    send_message(
+    chat_id,
+    f"🎉 @{user.get('username') or user['first_name']}, тест завершён!\n\n"
+    "Спасибо за участие! 🎁\n\n"
+    "Подписывайтесь на наши социальные сети:\n\n"
+    '<a href="https://www.instagram.com/mironair.by?dlrf=eDhzMHlrdGhqN2w1">Instagram Радио МИР</a>\n\n'
+    '<a href="https://www.tiktok.com/@tt_radiomir?_r=1&amp;_t=ZS-9BAXwEAtdQ5">TikTok Радио МИР</a>\n\n'
+    '<a href="https://t.me/mirbychat">Чат для общения</a>\n\n'
+    "До встречи в эфире Радио МИР! ❤️",
+    parse_mode="HTML"
+)
 
 @bot.callback_query_handler(func=lambda c: c.data == "start_test")
 def start_test(c):
