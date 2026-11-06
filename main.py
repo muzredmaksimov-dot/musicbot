@@ -317,7 +317,14 @@ def finish_test(chat_id):
         result_buffer.append(row)
 
     bot.send_message(ADMIN_CHAT_ID, f"✅ Пользователь {user.get('username') or user['first_name']} завершил тест.")
-    send_message(chat_id, f"🎉 @{user.get('username') or user['first_name']}, тест завершён!\n\nСледите за новостями в @RadioMIR_Efir 🎁")
+    send_message(chat_id, f"🎉 @{user.get('username') or user['first_name']}, тест завершён!\n\nСледите за новостями в @RadioMIR_Efir 🎁"
+                "Подписывайтесь на наши социальные сети:\n\n"
+    '<a href="https://www.instagram.com/mironair.by?dlrf=eDhzMHlrdGhqN2w1">Instagram Радио МИР</a>\n\n'
+    '<a href="https://www.tiktok.com/@tt_radiomir?_r=1&amp;_t=ZS-9BAXwEAtdQ5">TikTok Радио МИР</a>\n\n'
+    '<a href="https://t.me/mirbychat">Чат для общения</a>\n\n'
+    "До встречи в эфире Радио МИР! ❤️",
+    parse_mode="HTML"
+)
 
 # === СБРОС ===
 @bot.message_handler(commands=["reset_all"])
